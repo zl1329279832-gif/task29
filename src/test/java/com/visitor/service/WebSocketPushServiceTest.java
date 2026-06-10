@@ -192,4 +192,52 @@ class WebSocketPushServiceTest {
         assertEquals("ENTRY", message.get("gateAction"));
         assertEquals("CHECKED_IN", message.get("newStatus"));
     }
+
+    // ── Multi-gate push methods ──────────────────────────────────────
+
+    @Test
+    @DisplayName("pushAreaViolationAlert sends AREA_VIOLATION to SECURITY")
+    void pushAreaViolationAlert_sendsToSecurity() {
+        webSocketPushService.pushAreaViolationAlert("Li Si", "B栋会议区", "B栋正门", "未授权进入");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(webSocketHandler).pushToRole(eq(RoleEnum.SECURITY.name()), captor.capture());
+
+        Map<String, Object> message = captor.getValue();
+        assertEquals("AREA_VIOLATION", message.get("type"));
+        assertEquals("Li Si", message.get("visitorName"));
+        assertEquals("B栋正门", message.get("gateName"));
+    }
+
+    @Test
+    @DisplayName("pushCompanionAnomalyAlert sends COMPANION_ANOMALY to SECURITY")
+    void pushCompanionAnomalyAlert_sendsToSecurity() {
+        webSocketPushService.pushCompanionAnomalyAlert("Li Si", 5, 2, "A栋正门");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(webSocketHandler).pushToRole(eq(RoleEnum.SECURITY.name()), captor.capture());
+
+        Map<String, Object> message = captor.getValue();
+        assertEquals("COMPANION_ANOMALY", message.get("type"));
+        assertEquals("Li Si", message.get("visitorName"));
+        assertEquals(5, message.get("actualCount"));
+        assertEquals(2, message.get("maxAllowed"));
+    }
+
+    @Test
+    @DisplayName("pushTrajectoryUpdate sends TRAJECTORY_UPDATE to SECURITY")
+    void pushTrajectoryUpdate_sendsToSecurity() {
+        webSocketPushService.pushTrajectoryUpdate("Li Si", "A栋正门", "A栋办公区", "ENTRY");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(webSocketHandler).pushToRole(eq(RoleEnum.SECURITY.name()), captor.capture());
+
+        Map<String, Object> message = captor.getValue();
+        assertEquals("TRAJECTORY_UPDATE", message.get("type"));
+        assertEquals("Li Si", message.get("visitorName"));
+        assertEquals("ENTRY", message.get("action"));
+    }
 }

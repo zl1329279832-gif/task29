@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.visitor.mapper.GateMapper">
+
+    <select id="selectGateListByAreaId" resultType="com.visitor.model.vo.GateVO">
+        SELECT g.id, g.name, g.area_id AS areaId, ar.name AS areaName,
+               ar.building, g.location_desc AS locationDesc,
+               g.gate_type AS gateType, g.status, g.created_at AS createdAt
+        FROM gate g
+        LEFT JOIN area ar ON g.area_id = ar.id
+        <where>
+            <if test="areaId != null">
+                AND g.area_id = #{areaId}
+            </if>
+        </where>
+        ORDER BY g.id
+    </select>
+
+</mapper>

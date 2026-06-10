@@ -26,6 +26,7 @@ public class Appointment {
     private LocalDateTime approvedAt;
     private String rejectReason;
     private Long rescheduleFrom;
+    private Integer maxCompanions;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }

@@ -11,4 +11,6 @@ import java.util.List;
 public interface AccessLogMapper extends BaseMapper<AccessLog> {
     List<AccessLogVO> selectAccessLogList(@Param("visitorId") Long visitorId,
                                            @Param("appointmentId") Long appointmentId);
+
+    List<AccessLogVO> selectTrajectory(@Param("appointmentId") Long appointmentId);
 }

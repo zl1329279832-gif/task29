@@ -15,4 +15,5 @@ public class AppointmentCreateRequest {
     @NotNull(message = "预计到达时间不能为空")
     private LocalDateTime expectedArrive;
     private LocalDateTime expectedLeave;
+    private Integer maxCompanions;
 }

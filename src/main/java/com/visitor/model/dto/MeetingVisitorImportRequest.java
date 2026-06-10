@@ -11,4 +11,5 @@ public class MeetingVisitorImportRequest {
     private Long hostId;
     @NotEmpty(message = "访客列表不能为空")
     private List<MeetingVisitorImportItem> visitors;
+    private Long meetingAreaId;
 }

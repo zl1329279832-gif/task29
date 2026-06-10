@@ -36,6 +36,7 @@ public class AppointmentService {
     private final VisitorService visitorService;
     private final BlacklistService blacklistService;
     private final PassCodeService passCodeService;
+    private final AreaAuthorizationService areaAuthorizationService;
     private final WebSocketPushService webSocketPushService;
     private final RedisLock redisLock;
 
@@ -73,6 +74,7 @@ public class AppointmentService {
                 .expectedArrive(request.getExpectedArrive())
                 .expectedLeave(request.getExpectedLeave())
                 .status(AppointmentStatusEnum.PENDING)
+                .maxCompanions(request.getMaxCompanions() != null ? request.getMaxCompanions() : 0)
                 .build();
 
         appointmentMapper.insert(appointment);
@@ -204,6 +206,7 @@ public class AppointmentService {
         appointmentMapper.updateById(appointment);
 
         passCodeService.revokeByAppointmentId(appointmentId);
+        areaAuthorizationService.revokeByAppointmentId(appointmentId);
 
         log.info("Cancelled appointment {}", appointmentId);
     }
@@ -250,6 +253,7 @@ public class AppointmentService {
             oldAppointment.setStatus(AppointmentStatusEnum.CANCELLED);
             appointmentMapper.updateById(oldAppointment);
             passCodeService.revokeByAppointmentId(appointmentId);
+            areaAuthorizationService.revokeByAppointmentId(appointmentId);
 
             // Create new PENDING appointment (requires re-approval)
             Appointment newAppointment = Appointment.builder()
@@ -262,6 +266,7 @@ public class AppointmentService {
                     .expectedLeave(request.getExpectedLeave())
                     .status(AppointmentStatusEnum.PENDING)
                     .rescheduleFrom(appointmentId)
+                    .maxCompanions(oldAppointment.getMaxCompanions())
                     .build();
 
             appointmentMapper.insert(newAppointment);

@@ -43,6 +43,7 @@ class AppointmentServiceTest {
     @Mock private VisitorService visitorService;
     @Mock private BlacklistService blacklistService;
     @Mock private PassCodeService passCodeService;
+    @Mock private AreaAuthorizationService areaAuthorizationService;
     @Mock private WebSocketPushService webSocketPushService;
     @Mock private RedisLock redisLock;
 

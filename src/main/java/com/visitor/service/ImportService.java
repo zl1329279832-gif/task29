@@ -39,6 +39,7 @@ public class ImportService {
     private final VisitorService visitorService;
     private final AppointmentService appointmentService;
     private final BlacklistService blacklistService;
+    private final AreaAuthorizationService areaAuthorizationService;
     private final RedisLock redisLock;
     private final ObjectMapper objectMapper;
 
@@ -140,7 +141,8 @@ public class ImportService {
                     apptReq.setExpectedArrive(item.getExpectedArrive());
                     apptReq.setExpectedLeave(item.getExpectedLeave());
 
-                    createAppointmentForHost(request.getHostId(), apptReq, visitor);
+                    createAppointmentForHost(request.getHostId(), apptReq, visitor,
+                            request.getMeetingAreaId());
 
                     successCount++;
                 } catch (Exception e) {
@@ -202,8 +204,10 @@ public class ImportService {
 
     /**
      * Create appointment for a specific host (used in batch import).
+     * If meetingAreaId is provided, auto-create area authorization.
      */
-    private void createAppointmentForHost(Long hostId, AppointmentCreateRequest request, Visitor visitor) {
+    private void createAppointmentForHost(Long hostId, AppointmentCreateRequest request,
+                                           Visitor visitor, Long meetingAreaId) {
         SysUser host = sysUserMapper.selectById(hostId);
         if (host == null) {
             throw new IllegalArgumentException("Host not found");
@@ -224,5 +228,15 @@ public class ImportService {
                 .build();
 
         appointmentMapper.insert(appointment);
+
+        // Auto-create area authorization if meeting area is specified
+        if (meetingAreaId != null) {
+            LocalDateTime validTo = request.getExpectedLeave() != null
+                    ? request.getExpectedLeave()
+                    : request.getExpectedArrive().plusHours(8);
+            areaAuthorizationService.createAuthorization(
+                    appointment.getId(), meetingAreaId,
+                    request.getExpectedArrive(), validTo);
+        }
     }
 }

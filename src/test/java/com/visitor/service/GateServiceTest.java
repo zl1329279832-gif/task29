@@ -41,6 +41,8 @@ class GateServiceTest {
     @Mock private AppointmentService appointmentService;
     @Mock private VisitorService visitorService;
     @Mock private BlacklistService blacklistService;
+    @Mock private AreaService areaService;
+    @Mock private AreaAuthorizationService areaAuthorizationService;
     @Mock private WebSocketPushService webSocketPushService;
     @Mock private RedisLock redisLock;
 
@@ -245,6 +247,7 @@ class GateServiceTest {
 
         when(appointmentService.getById(1L)).thenReturn(testAppointment);
         when(sysUserMapper.findByUsername("security1")).thenReturn(securityUser);
+        when(visitorService.getById(10L)).thenReturn(testVisitor);
         when(accessLogMapper.insert(any())).thenReturn(1);
 
         AccessLog result = gateService.checkout(request);
@@ -305,5 +308,193 @@ class GateServiceTest {
 
         BizException ex = assertThrows(BizException.class, () -> gateService.checkout(request));
         assertEquals(ErrorCode.NOT_CHECKED_IN, ex.getErrorCode());
+    }
+
+    // ── Multi-gate tests ──────────────────────────────────────────────
+
+    @Test
+    void testCheckin_WithGate_AreaAuthorized_Success() {
+        GateCheckinRequest request = new GateCheckinRequest();
+        request.setPassCode("valid.code");
+        request.setGateLocation("A栋正门");
+        request.setGateId(1L);
+
+        PassCode passCode = PassCode.builder()
+                .id(1L).code("valid.code").appointmentId(1L)
+                .maxUses(4).usedCount(0).status(PassCodeStatusEnum.ACTIVE).build();
+
+        Gate gate = Gate.builder()
+                .id(1L).name("A栋正门").areaId(1L).locationDesc("A栋办公楼正门")
+                .gateType(GateTypeEnum.NORMAL).status(1).build();
+
+        when(passCodeService.verifyForScan("valid.code")).thenReturn(passCode);
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
+        when(appointmentService.getById(1L)).thenReturn(testAppointment);
+        when(visitorService.getById(10L)).thenReturn(testVisitor);
+        when(appointmentService.hasUndepartedAppointment(10L, 1L)).thenReturn(false);
+        when(blacklistService.check(anyString(), any(), anyString())).thenReturn(null);
+        when(areaService.getGateAndValidate(1L)).thenReturn(gate);
+        when(areaService.isGateEntryAllowed(gate)).thenReturn(true);
+        doNothing().when(areaAuthorizationService).validateGateAccess(eq(1L), eq(1L), any());
+        when(passCodeService.confirmUsage(1L)).thenReturn(passCode);
+        when(sysUserMapper.findByUsername("security1")).thenReturn(securityUser);
+        when(sysUserMapper.selectById(1L)).thenReturn(hostUser);
+        when(accessLogMapper.insert(any())).thenReturn(1);
+
+        AccessLog result = gateService.checkin(request);
+
+        assertNotNull(result);
+        assertEquals(1L, result.getGateId());
+        assertEquals(1L, result.getAreaId());
+        verify(areaAuthorizationService).validateGateAccess(eq(1L), eq(1L), any());
+        verify(webSocketPushService).pushTrajectoryUpdate(eq("Li Si"), eq("A栋正门"), eq("A栋办公楼正门"), eq("ENTRY"));
+    }
+
+    @Test
+    void testCheckin_WithGate_AreaUnauthorized_Denied() {
+        GateCheckinRequest request = new GateCheckinRequest();
+        request.setPassCode("valid.code");
+        request.setGateId(1L);
+
+        PassCode passCode = PassCode.builder()
+                .id(1L).code("valid.code").appointmentId(1L).build();
+
+        Gate gate = Gate.builder()
+                .id(1L).name("B栋正门").areaId(2L).locationDesc("B栋")
+                .gateType(GateTypeEnum.NORMAL).status(1).build();
+
+        when(passCodeService.verifyForScan("valid.code")).thenReturn(passCode);
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
+        when(appointmentService.getById(1L)).thenReturn(testAppointment);
+        when(visitorService.getById(10L)).thenReturn(testVisitor);
+        when(appointmentService.hasUndepartedAppointment(10L, 1L)).thenReturn(false);
+        when(blacklistService.check(anyString(), any(), anyString())).thenReturn(null);
+        when(areaService.getGateAndValidate(1L)).thenReturn(gate);
+        when(areaService.isGateEntryAllowed(gate)).thenReturn(true);
+        doThrow(new BizException(ErrorCode.UNAUTHORIZED_AREA_ACCESS))
+                .when(areaAuthorizationService).validateGateAccess(eq(1L), eq(1L), any());
+        when(anomalyRecordMapper.insert(any())).thenReturn(1);
+
+        BizException ex = assertThrows(BizException.class, () -> gateService.checkin(request));
+        assertEquals(ErrorCode.UNAUTHORIZED_AREA_ACCESS, ex.getErrorCode());
+
+        // Pass code should NOT have been consumed
+        verify(passCodeService, never()).confirmUsage(anyLong());
+        // Anomaly record should be created with gate context
+        verify(anomalyRecordMapper).insert(argThat(record ->
+                record.getAnomalyType() == AnomalyTypeEnum.UNAUTHORIZED_AREA
+                        && record.getGateId() != null));
+        verify(webSocketPushService).pushAreaViolationAlert(anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void testCheckin_WithGate_CompanionExceeded_Denied() {
+        testAppointment.setMaxCompanions(2);
+
+        GateCheckinRequest request = new GateCheckinRequest();
+        request.setPassCode("valid.code");
+        request.setGateId(1L);
+        request.setCompanionCount(5);
+
+        PassCode passCode = PassCode.builder()
+                .id(1L).code("valid.code").appointmentId(1L).build();
+
+        Gate gate = Gate.builder()
+                .id(1L).name("A栋正门").areaId(1L).locationDesc("A栋")
+                .gateType(GateTypeEnum.NORMAL).status(1).build();
+
+        when(passCodeService.verifyForScan("valid.code")).thenReturn(passCode);
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
+        when(appointmentService.getById(1L)).thenReturn(testAppointment);
+        when(visitorService.getById(10L)).thenReturn(testVisitor);
+        when(appointmentService.hasUndepartedAppointment(10L, 1L)).thenReturn(false);
+        when(blacklistService.check(anyString(), any(), anyString())).thenReturn(null);
+        when(areaService.getGateAndValidate(1L)).thenReturn(gate);
+        when(areaService.isGateEntryAllowed(gate)).thenReturn(true);
+        doNothing().when(areaAuthorizationService).validateGateAccess(eq(1L), eq(1L), any());
+        when(anomalyRecordMapper.insert(any())).thenReturn(1);
+
+        BizException ex = assertThrows(BizException.class, () -> gateService.checkin(request));
+        assertEquals(ErrorCode.COMPANION_LIMIT_EXCEEDED, ex.getErrorCode());
+
+        verify(passCodeService, never()).confirmUsage(anyLong());
+        verify(anomalyRecordMapper).insert(argThat(record ->
+                record.getAnomalyType() == AnomalyTypeEnum.COMPANION_ANOMALY));
+        verify(webSocketPushService).pushCompanionAnomalyAlert(eq("Li Si"), eq(5), eq(2), anyString());
+    }
+
+    @Test
+    void testCheckin_WithGate_GateDisabled_Denied() {
+        GateCheckinRequest request = new GateCheckinRequest();
+        request.setPassCode("valid.code");
+        request.setGateId(1L);
+
+        PassCode passCode = PassCode.builder()
+                .id(1L).code("valid.code").appointmentId(1L).build();
+
+        when(passCodeService.verifyForScan("valid.code")).thenReturn(passCode);
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
+        when(appointmentService.getById(1L)).thenReturn(testAppointment);
+        when(visitorService.getById(10L)).thenReturn(testVisitor);
+        when(appointmentService.hasUndepartedAppointment(10L, 1L)).thenReturn(false);
+        when(blacklistService.check(anyString(), any(), anyString())).thenReturn(null);
+        when(areaService.getGateAndValidate(1L))
+                .thenThrow(new BizException(ErrorCode.GATE_DISABLED));
+
+        BizException ex = assertThrows(BizException.class, () -> gateService.checkin(request));
+        assertEquals(ErrorCode.GATE_DISABLED, ex.getErrorCode());
+        verify(passCodeService, never()).confirmUsage(anyLong());
+    }
+
+    @Test
+    void testCheckout_WithGate_AreaContext() {
+        testAppointment.setStatus(AppointmentStatusEnum.CHECKED_IN);
+
+        GateCheckoutRequest request = new GateCheckoutRequest();
+        request.setVisitorId(10L);
+        request.setAppointmentId(1L);
+        request.setGateLocation("A栋正门");
+        request.setGateId(1L);
+
+        Gate gate = Gate.builder()
+                .id(1L).name("A栋正门").areaId(1L).locationDesc("A栋")
+                .gateType(GateTypeEnum.NORMAL).status(1).build();
+
+        when(appointmentService.getById(1L)).thenReturn(testAppointment);
+        when(areaService.getGateAndValidate(1L)).thenReturn(gate);
+        when(areaService.isGateExitAllowed(gate)).thenReturn(true);
+        when(sysUserMapper.findByUsername("security1")).thenReturn(securityUser);
+        when(visitorService.getById(10L)).thenReturn(testVisitor);
+        when(accessLogMapper.insert(any())).thenReturn(1);
+
+        AccessLog result = gateService.checkout(request);
+
+        assertNotNull(result);
+        assertEquals(AccessActionEnum.EXIT, result.getAction());
+        assertEquals(1L, result.getGateId());
+        assertEquals(1L, result.getAreaId());
+        verify(webSocketPushService).pushTrajectoryUpdate(eq("Li Si"), eq("A栋正门"), eq("A栋"), eq("EXIT"));
+    }
+
+    @Test
+    void testCheckout_EntryOnlyGate_Fails() {
+        testAppointment.setStatus(AppointmentStatusEnum.CHECKED_IN);
+
+        GateCheckoutRequest request = new GateCheckoutRequest();
+        request.setVisitorId(10L);
+        request.setAppointmentId(1L);
+        request.setGateId(1L);
+
+        Gate gate = Gate.builder()
+                .id(1L).name("入口闸机").areaId(1L)
+                .gateType(GateTypeEnum.ENTRY_ONLY).status(1).build();
+
+        when(appointmentService.getById(1L)).thenReturn(testAppointment);
+        when(areaService.getGateAndValidate(1L)).thenReturn(gate);
+        when(areaService.isGateExitAllowed(gate)).thenReturn(false);
+
+        BizException ex = assertThrows(BizException.class, () -> gateService.checkout(request));
+        assertEquals(ErrorCode.GATE_AREA_MISMATCH, ex.getErrorCode());
+        verify(appointmentService, never()).markCompleted(anyLong());
     }
 }

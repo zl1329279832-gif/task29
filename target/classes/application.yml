@@ -57,6 +57,9 @@ visitor:
     hmac-key: PassCodeHmacKey2024Secure
     default-max-uses: 2  # entry + exit
     qr-size: 300
+  gate:
+    default-companion-limit: 0
+    area-overtime-threshold: 60  # minutes
 
 logging:
   level:

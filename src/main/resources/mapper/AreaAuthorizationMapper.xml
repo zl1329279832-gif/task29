@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.visitor.mapper.AreaAuthorizationMapper">
+
+    <select id="selectByAppointmentAndTime" resultType="com.visitor.model.entity.AreaAuthorization">
+        SELECT * FROM area_authorization
+        WHERE appointment_id = #{appointmentId}
+          AND #{now} BETWEEN valid_from AND valid_to
+    </select>
+
+    <delete id="deleteByAppointmentId">
+        DELETE FROM area_authorization WHERE appointment_id = #{appointmentId}
+    </delete>
+
+</mapper>

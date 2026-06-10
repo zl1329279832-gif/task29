@@ -24,5 +24,9 @@ public class AccessLogVO {
     private AccessResultEnum result;
     private String denyReason;
     private Long operatorId;
+    private Long gateId;
+    private String gateName;
+    private Long areaId;
+    private String areaName;
     private LocalDateTime createdAt;
 }

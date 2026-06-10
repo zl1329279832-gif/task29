@@ -44,6 +44,14 @@ public class PassCodeService {
      * Idempotent: returns existing pass code if already generated.
      */
     public PassCode generateForAppointment(Appointment appointment) {
+        return generateForAppointment(appointment, 1);
+    }
+
+    /**
+     * Generate pass code with dynamic maxUses based on authorized area count.
+     * maxUses = max(defaultMaxUses, authorizedAreaCount * 2) to allow entry+exit per area.
+     */
+    public PassCode generateForAppointment(Appointment appointment, int authorizedAreaCount) {
         PassCode existing = getPassCodeByAppointmentId(appointment.getId());
         if (existing != null) {
             return existing;
@@ -52,11 +60,13 @@ public class PassCodeService {
         String code = QrCodeUtil.generatePassCode(hmacKey);
         String qrImage = QrCodeUtil.generateQrCodeBase64(code, qrSize);
 
+        int computedMaxUses = Math.max(defaultMaxUses, authorizedAreaCount * 2);
+
         PassCode passCode = PassCode.builder()
                 .appointmentId(appointment.getId())
                 .code(code)
                 .qrImage(qrImage)
-                .maxUses(defaultMaxUses)
+                .maxUses(computedMaxUses)
                 .usedCount(0)
                 .validFrom(appointment.getExpectedArrive())
                 .validTo(appointment.getExpectedLeave() != null
@@ -68,7 +78,8 @@ public class PassCodeService {
         passCodeMapper.insert(passCode);
         cachePassCode(passCode);
 
-        log.info("Generated pass code for appointment {}: {}", appointment.getId(), code);
+        log.info("Generated pass code for appointment {}: {} (maxUses={})",
+                appointment.getId(), code, computedMaxUses);
         return passCode;
     }
 

@@ -181,6 +181,75 @@ CREATE TABLE import_batch (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Batch import records';
 
 -- ----------------------------------------------------------------
+-- 10. area - Park areas / buildings / zones
+-- ----------------------------------------------------------------
+CREATE TABLE area (
+    id          BIGINT       NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+    name        VARCHAR(100) NOT NULL COMMENT 'Area name',
+    building    VARCHAR(100) DEFAULT NULL COMMENT 'Building name',
+    description VARCHAR(500) DEFAULT NULL COMMENT 'Description',
+    status      TINYINT      NOT NULL DEFAULT 1 COMMENT '0=disabled, 1=enabled',
+    created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Park areas';
+
+-- ----------------------------------------------------------------
+-- 11. gate - Physical gate terminals
+-- ----------------------------------------------------------------
+CREATE TABLE gate (
+    id            BIGINT       NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+    name          VARCHAR(100) NOT NULL COMMENT 'Gate name',
+    area_id       BIGINT       NOT NULL COMMENT 'Area ID',
+    location_desc VARCHAR(200) DEFAULT NULL COMMENT 'Location description',
+    gate_type     VARCHAR(20)  NOT NULL DEFAULT 'NORMAL' COMMENT 'Type: NORMAL, ENTRY_ONLY, EXIT_ONLY',
+    status        TINYINT      NOT NULL DEFAULT 1 COMMENT '0=disabled, 1=enabled',
+    created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_area (area_id),
+    KEY idx_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Physical gate terminals';
+
+-- ----------------------------------------------------------------
+-- 12. area_authorization - Per-appointment area access grants
+-- ----------------------------------------------------------------
+CREATE TABLE area_authorization (
+    id              BIGINT   NOT NULL AUTO_INCREMENT COMMENT 'Primary key',
+    appointment_id  BIGINT   NOT NULL COMMENT 'Appointment ID',
+    area_id         BIGINT   NOT NULL COMMENT 'Area ID',
+    valid_from      DATETIME NOT NULL COMMENT 'Valid from',
+    valid_to        DATETIME NOT NULL COMMENT 'Valid to',
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_appointment (appointment_id),
+    KEY idx_area (area_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Area access authorizations';
+
+-- ----------------------------------------------------------------
+-- 13. Alter existing tables for multi-gate support
+-- ----------------------------------------------------------------
+ALTER TABLE access_log ADD COLUMN gate_id BIGINT DEFAULT NULL COMMENT 'Gate ID' AFTER operator_id;
+ALTER TABLE access_log ADD COLUMN area_id BIGINT DEFAULT NULL COMMENT 'Area ID' AFTER gate_id;
+
+ALTER TABLE appointment ADD COLUMN max_companions INT NOT NULL DEFAULT 0 COMMENT 'Max allowed companions' AFTER reschedule_from;
+
+ALTER TABLE anomaly_record ADD COLUMN gate_id BIGINT DEFAULT NULL COMMENT 'Gate ID' AFTER appointment_id;
+ALTER TABLE anomaly_record ADD COLUMN area_id BIGINT DEFAULT NULL COMMENT 'Area ID' AFTER gate_id;
+
+-- ----------------------------------------------------------------
+-- Seed data: areas and gates
+-- ----------------------------------------------------------------
+INSERT INTO area (name, building, description, status) VALUES
+('A栋办公区', 'A栋', 'A栋办公楼1-5层', 1),
+('B栋会议区', 'B栋', 'B栋会议中心', 1);
+
+INSERT INTO gate (name, area_id, location_desc, gate_type, status) VALUES
+('A栋正门', 1, 'A栋办公楼正门入口', 'NORMAL', 1),
+('B栋正门', 2, 'B栋会议中心正门', 'NORMAL', 1);
+
+-- ----------------------------------------------------------------
 -- Initial data: admin user (password: admin123)
 -- ----------------------------------------------------------------
 INSERT INTO sys_user (username, password, real_name, dept_name, role, phone, status)

@@ -22,5 +22,7 @@ public class AccessLog {
     private AccessResultEnum result;
     private String denyReason;
     private Long operatorId;
+    private Long gateId;
+    private Long areaId;
     private LocalDateTime createdAt;
 }

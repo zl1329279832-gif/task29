@@ -46,6 +46,7 @@ class ImportServiceTest {
     @Mock private AppointmentService appointmentService;
     @Mock private BlacklistService blacklistService;
     @Mock private AppointmentMapper appointmentMapper;
+    @Mock private AreaAuthorizationService areaAuthorizationService;
     @Mock private RedisLock redisLock;
     @Spy private ObjectMapper objectMapper = new ObjectMapper();
 
@@ -250,5 +251,72 @@ class ImportServiceTest {
         BizException ex = assertThrows(BizException.class,
                 () -> importService.importMeetingVisitors(request));
         assertEquals(ErrorCode.PARAM_INVALID, ex.getErrorCode());
+    }
+
+    // ── Area authorization tests ──────────────────────────────────────
+
+    @Test
+    void testImport_WithMeetingArea_CreatesAuthorization() {
+        MeetingVisitorImportRequest request = new MeetingVisitorImportRequest();
+        request.setHostId(1L);
+        request.setMeetingAreaId(2L);
+
+        MeetingVisitorImportItem item = new MeetingVisitorImportItem();
+        item.setName("Meeting Visitor");
+        item.setPhone("13800000099");
+        item.setExpectedArrive(LocalDateTime.now().plusDays(1));
+        item.setExpectedLeave(LocalDateTime.now().plusDays(1).plusHours(2));
+        request.setVisitors(List.of(item));
+
+        Visitor visitor = Visitor.builder().id(10L).name("Meeting Visitor").build();
+
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
+        when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
+        when(sysUserMapper.selectById(1L)).thenReturn(operator);
+        when(visitorService.registerOrFind(any())).thenReturn(visitor);
+        when(blacklistService.check(any(), any(), any())).thenReturn(null);
+        when(appointmentMapper.insert(any())).thenAnswer(invocation -> {
+            com.visitor.model.entity.Appointment appt = invocation.getArgument(0);
+            appt.setId(100L);
+            return 1;
+        });
+        when(importBatchMapper.insert(any())).thenReturn(1);
+        when(areaAuthorizationService.createAuthorization(anyLong(), anyLong(), any(), any()))
+                .thenReturn(null);
+
+        ImportBatch result = importService.importMeetingVisitors(request);
+
+        assertEquals(1, result.getSuccessCount());
+        verify(areaAuthorizationService).createAuthorization(
+                eq(100L), eq(2L), any(), any());
+    }
+
+    @Test
+    void testImport_WithoutMeetingArea_NoAuthorization() {
+        MeetingVisitorImportRequest request = new MeetingVisitorImportRequest();
+        request.setHostId(1L);
+        // meetingAreaId is null
+
+        MeetingVisitorImportItem item = new MeetingVisitorImportItem();
+        item.setName("No Area Visitor");
+        item.setPhone("13800000088");
+        item.setExpectedArrive(LocalDateTime.now().plusDays(1));
+        request.setVisitors(List.of(item));
+
+        Visitor visitor = Visitor.builder().id(10L).name("No Area Visitor").build();
+
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
+        when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
+        when(sysUserMapper.selectById(1L)).thenReturn(operator);
+        when(visitorService.registerOrFind(any())).thenReturn(visitor);
+        when(blacklistService.check(any(), any(), any())).thenReturn(null);
+        when(appointmentMapper.insert(any())).thenReturn(1);
+        when(importBatchMapper.insert(any())).thenReturn(1);
+
+        ImportBatch result = importService.importMeetingVisitors(request);
+
+        assertEquals(1, result.getSuccessCount());
+        verify(areaAuthorizationService, never()).createAuthorization(
+                anyLong(), anyLong(), any(), any());
     }
 }

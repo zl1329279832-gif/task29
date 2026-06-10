@@ -13,4 +13,5 @@ public class AnomalyReleaseRequest {
     private AnomalyTypeEnum anomalyType;
     private String description;
     private String gateLocation;
+    private Long gateId;
 }

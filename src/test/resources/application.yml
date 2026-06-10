@@ -24,3 +24,6 @@ visitor:
     hmac-key: TestHmacKey2024
     default-max-uses: 2
     qr-size: 200
+  gate:
+    default-companion-limit: 0
+    area-overtime-threshold: 60

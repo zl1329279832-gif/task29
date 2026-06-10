@@ -41,6 +41,13 @@ public enum ErrorCode {
     NO_REENTRY_WITHOUT_EXIT(400020, "访客尚未离场，不允许重复入场"),
     BATCH_DUPLICATE_VISITOR(400021, "批次内访客重复"),
     APPROVAL_ALREADY_PROCESSED(400022, "审批已处理，请勿重复操作"),
+    AREA_NOT_FOUND(400023, "区域不存在"),
+    GATE_NOT_FOUND(400024, "门岗不存在"),
+    UNAUTHORIZED_AREA_ACCESS(400025, "未授权进入该区域"),
+    COMPANION_LIMIT_EXCEEDED(400026, "随行人数超过限制"),
+    GATE_DISABLED(400027, "门岗已停用"),
+    AREA_AUTHORIZATION_EXPIRED(400028, "区域授权已过期"),
+    GATE_AREA_MISMATCH(400029, "门岗类型不允许该操作"),
 
     // System errors 500xxx
     SYSTEM_ERROR(500001, "系统内部错误"),

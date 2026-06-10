@@ -16,6 +16,8 @@ public class AnomalyRecord {
     private Long id;
     private Long visitorId;
     private Long appointmentId;
+    private Long gateId;
+    private Long areaId;
     private AnomalyTypeEnum anomalyType;
     private String description;
     private Long securityId;

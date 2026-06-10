@@ -125,6 +125,52 @@ public class WebSocketPushService {
         pushToUserWithRetry(targetUserId, message, "gateStatusChange");
     }
 
+    /**
+     * Push area violation alert to security.
+     */
+    public void pushAreaViolationAlert(String visitorName, String areaName,
+                                        String gateName, String description) {
+        Map<String, Object> message = buildMessage("AREA_VIOLATION",
+                "visitorName", visitorName,
+                "areaName", areaName,
+                "gateName", gateName,
+                "description", description,
+                "message", "区域越权告警：访客 " + visitorName + " 在 " + gateName + " 尝试进入未授权区域");
+
+        pushToRoleWithRetry(RoleEnum.SECURITY.name(), message, "areaViolation");
+    }
+
+    /**
+     * Push companion anomaly alert to security.
+     */
+    public void pushCompanionAnomalyAlert(String visitorName, int actualCount,
+                                           int maxAllowed, String gateName) {
+        Map<String, Object> message = buildMessage("COMPANION_ANOMALY",
+                "visitorName", visitorName,
+                "actualCount", actualCount,
+                "maxAllowed", maxAllowed,
+                "gateName", gateName,
+                "message", "随行人员异常：访客 " + visitorName + " 随行 "
+                        + actualCount + " 人，超过限制 " + maxAllowed + " 人");
+
+        pushToRoleWithRetry(RoleEnum.SECURITY.name(), message, "companionAnomaly");
+    }
+
+    /**
+     * Push trajectory update to security.
+     */
+    public void pushTrajectoryUpdate(String visitorName, String gateName,
+                                      String areaName, String action) {
+        Map<String, Object> message = buildMessage("TRAJECTORY_UPDATE",
+                "visitorName", visitorName,
+                "gateName", gateName,
+                "areaName", areaName,
+                "action", action,
+                "message", "访客轨迹更新：" + visitorName + " " + action + " " + gateName);
+
+        pushToRoleWithRetry(RoleEnum.SECURITY.name(), message, "trajectoryUpdate");
+    }
+
     // ── Internal retry helpers ──────────────────────────────────────────
 
     private void pushToUserWithRetry(String userId, Map<String, Object> message, String pushType) {

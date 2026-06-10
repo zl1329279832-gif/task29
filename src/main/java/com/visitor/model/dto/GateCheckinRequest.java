@@ -8,4 +8,6 @@ public class GateCheckinRequest {
     @NotBlank(message = "通行码不能为空")
     private String passCode;
     private String gateLocation;
+    private Long gateId;
+    private Integer companionCount;
 }

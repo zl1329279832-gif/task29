@@ -36,6 +36,8 @@ public class GateService {
     private final AppointmentService appointmentService;
     private final VisitorService visitorService;
     private final BlacklistService blacklistService;
+    private final AreaService areaService;
+    private final AreaAuthorizationService areaAuthorizationService;
     private final WebSocketPushService webSocketPushService;
     private final RedisLock redisLock;
 
@@ -98,8 +100,55 @@ public class GateService {
             // ── 4. Blacklist re-check at gate (BEFORE consuming pass code) ──
             Blacklist bl = blacklistService.check(visitor.getName(), visitor.getIdCard(), visitor.getPhone());
             if (bl != null) {
-                handleBlacklistDenial(passCode, visitor, appointment, bl, request.getGateLocation());
+                handleBlacklistDenial(passCode, visitor, appointment, bl, request.getGateLocation(),
+                        request.getGateId());
                 throw new BizException(ErrorCode.BLACKLIST_HIT, bl.getReason());
+            }
+
+            // ── 5a. Gate validation + area authorization check ──────────────
+            Gate gate = null;
+            Long resolvedGateId = null;
+            Long resolvedAreaId = null;
+            if (request.getGateId() != null) {
+                gate = areaService.getGateAndValidate(request.getGateId());
+                if (!areaService.isGateEntryAllowed(gate)) {
+                    throw new BizException(ErrorCode.GATE_AREA_MISMATCH,
+                            "该门岗仅允许出场，不允许入场");
+                }
+                try {
+                    areaAuthorizationService.validateGateAccess(
+                            appointmentId, gate.getId(), LocalDateTime.now());
+                } catch (BizException e) {
+                    // Unauthorized area access — create anomaly and push alert
+                    createAnomalyWithGate(visitor.getId(), appointmentId,
+                            AnomalyTypeEnum.UNAUTHORIZED_AREA,
+                            "访客 " + visitor.getName() + " 尝试进入未授权区域: " + gate.getName(),
+                            null, gate.getId(), gate.getAreaId());
+                    webSocketPushService.pushAreaViolationAlert(
+                            visitor.getName(), gate.getLocationDesc(), gate.getName(),
+                            "未授权进入区域");
+                    throw e;
+                }
+                resolvedGateId = gate.getId();
+                resolvedAreaId = gate.getAreaId();
+            }
+
+            // ── 5b. Companion count check ──────────────────────────────
+            if (request.getCompanionCount() != null && appointment.getMaxCompanions() != null) {
+                if (request.getCompanionCount() > appointment.getMaxCompanions()) {
+                    createAnomalyWithGate(visitor.getId(), appointmentId,
+                            AnomalyTypeEnum.COMPANION_ANOMALY,
+                            "随行人数超限: 实际 " + request.getCompanionCount()
+                                    + " 人, 限制 " + appointment.getMaxCompanions() + " 人",
+                            null, resolvedGateId, resolvedAreaId);
+                    webSocketPushService.pushCompanionAnomalyAlert(
+                            visitor.getName(), request.getCompanionCount(),
+                            appointment.getMaxCompanions(),
+                            gate != null ? gate.getName() : request.getGateLocation());
+                    throw new BizException(ErrorCode.COMPANION_LIMIT_EXCEEDED,
+                            "随行人数 " + request.getCompanionCount()
+                                    + " 超过限制 " + appointment.getMaxCompanions());
+                }
             }
 
             // ── 5. Phase 2: Commit pass code usage ──────────────────────
@@ -120,6 +169,8 @@ public class GateService {
                     .gateLocation(request.getGateLocation())
                     .result(AccessResultEnum.PASS)
                     .operatorId(operator != null ? operator.getId() : null)
+                    .gateId(resolvedGateId)
+                    .areaId(resolvedAreaId)
                     .build();
             accessLogMapper.insert(accessLog);
 
@@ -130,7 +181,16 @@ public class GateService {
                         host.getId().toString(), visitor.getName(), appointment.getAppointNo());
             }
 
-            log.info("Visitor {} checked in for appointment {}", visitor.getName(), appointment.getAppointNo());
+            // Push trajectory update to security
+            webSocketPushService.pushTrajectoryUpdate(
+                    visitor.getName(),
+                    gate != null ? gate.getName() : request.getGateLocation(),
+                    gate != null ? gate.getLocationDesc() : null,
+                    "ENTRY");
+
+            log.info("Visitor {} checked in for appointment {} at gate {}",
+                    visitor.getName(), appointment.getAppointNo(),
+                    gate != null ? gate.getName() : request.getGateLocation());
             return accessLog;
         } finally {
             redisLock.unlock(lockKey, lockValue);
@@ -163,6 +223,20 @@ public class GateService {
             throw new BizException(ErrorCode.NOT_CHECKED_IN);
         }
 
+        // Gate validation for exit
+        Gate gate = null;
+        Long resolvedGateId = null;
+        Long resolvedAreaId = null;
+        if (request.getGateId() != null) {
+            gate = areaService.getGateAndValidate(request.getGateId());
+            if (!areaService.isGateExitAllowed(gate)) {
+                throw new BizException(ErrorCode.GATE_AREA_MISMATCH,
+                        "该门岗仅允许入场，不允许出场");
+            }
+            resolvedGateId = gate.getId();
+            resolvedAreaId = gate.getAreaId();
+        }
+
         // Mark completed
         appointmentService.markCompleted(request.getAppointmentId());
 
@@ -177,11 +251,22 @@ public class GateService {
                 .gateLocation(request.getGateLocation())
                 .result(AccessResultEnum.PASS)
                 .operatorId(operator != null ? operator.getId() : null)
+                .gateId(resolvedGateId)
+                .areaId(resolvedAreaId)
                 .build();
         accessLogMapper.insert(accessLog);
 
-        log.info("Visitor {} checked out for appointment {}",
-                request.getVisitorId(), appointment.getAppointNo());
+        // Push trajectory update
+        Visitor visitor = visitorService.getById(request.getVisitorId());
+        webSocketPushService.pushTrajectoryUpdate(
+                visitor.getName(),
+                gate != null ? gate.getName() : request.getGateLocation(),
+                gate != null ? gate.getLocationDesc() : null,
+                "EXIT");
+
+        log.info("Visitor {} checked out for appointment {} at gate {}",
+                request.getVisitorId(), appointment.getAppointNo(),
+                gate != null ? gate.getName() : request.getGateLocation());
         return accessLog;
     }
 
@@ -193,9 +278,19 @@ public class GateService {
         String username = SecurityContextHolder.getContext().getAuthentication().getName();
         SysUser security = sysUserMapper.findByUsername(username);
 
+        Long resolvedGateId = null;
+        Long resolvedAreaId = null;
+        if (request.getGateId() != null) {
+            Gate gate = areaService.getGateAndValidate(request.getGateId());
+            resolvedGateId = gate.getId();
+            resolvedAreaId = gate.getAreaId();
+        }
+
         AnomalyRecord anomaly = AnomalyRecord.builder()
                 .visitorId(request.getVisitorId())
                 .appointmentId(request.getAppointmentId())
+                .gateId(resolvedGateId)
+                .areaId(resolvedAreaId)
                 .anomalyType(request.getAnomalyType())
                 .description(request.getDescription())
                 .securityId(security != null ? security.getId() : null)
@@ -212,6 +307,8 @@ public class GateService {
                 .result(AccessResultEnum.ANOMALY)
                 .denyReason("Anomaly release: " + request.getAnomalyType())
                 .operatorId(security != null ? security.getId() : null)
+                .gateId(resolvedGateId)
+                .areaId(resolvedAreaId)
                 .build();
         accessLogMapper.insert(accessLog);
 
@@ -250,10 +347,19 @@ public class GateService {
      */
     private void handleBlacklistDenial(PassCode passCode, Visitor visitor,
                                         Appointment appointment, Blacklist bl,
-                                        String gateLocation) {
-        createAnomaly(visitor.getId(), appointment.getId(),
+                                        String gateLocation, Long gateId) {
+        Gate gate = null;
+        Long resolvedGateId = gateId;
+        Long resolvedAreaId = null;
+        if (gateId != null) {
+            gate = areaService.getGateAndValidate(gateId);
+            resolvedAreaId = gate.getAreaId();
+        }
+
+        createAnomalyWithGate(visitor.getId(), appointment.getId(),
                 AnomalyTypeEnum.BLACKLIST_ATTEMPT,
-                "Blacklisted visitor attempted entry: " + bl.getReason(), null);
+                "Blacklisted visitor attempted entry: " + bl.getReason(),
+                null, resolvedGateId, resolvedAreaId);
 
         webSocketPushService.pushBlacklistAlert(visitor.getName(), bl.getReason(), gateLocation);
 
@@ -265,6 +371,8 @@ public class GateService {
                 .gateLocation(gateLocation)
                 .result(AccessResultEnum.DENIED)
                 .denyReason("BLACKLISTED: " + bl.getReason())
+                .gateId(resolvedGateId)
+                .areaId(resolvedAreaId)
                 .build();
         accessLogMapper.insert(deniedLog);
 
@@ -274,9 +382,17 @@ public class GateService {
 
     private void createAnomaly(Long visitorId, Long appointmentId, AnomalyTypeEnum type,
                                 String description, Long securityId) {
+        createAnomalyWithGate(visitorId, appointmentId, type, description, securityId, null, null);
+    }
+
+    private void createAnomalyWithGate(Long visitorId, Long appointmentId, AnomalyTypeEnum type,
+                                        String description, Long securityId,
+                                        Long gateId, Long areaId) {
         AnomalyRecord record = AnomalyRecord.builder()
                 .visitorId(visitorId)
                 .appointmentId(appointmentId)
+                .gateId(gateId)
+                .areaId(areaId)
                 .anomalyType(type)
                 .description(description)
                 .securityId(securityId)
