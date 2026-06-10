@@ -13,6 +13,7 @@ import com.visitor.model.entity.SysUser;
 import com.visitor.model.entity.Visitor;
 import com.visitor.model.enums.ImportStatusEnum;
 import com.visitor.model.enums.RoleEnum;
+import com.visitor.util.RedisLock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -44,6 +45,7 @@ class ImportServiceTest {
     @Mock private AppointmentService appointmentService;
     @Mock private BlacklistService blacklistService;
     @Mock private AppointmentMapper appointmentMapper;
+    @Mock private RedisLock redisLock;
     @Spy private ObjectMapper objectMapper = new ObjectMapper();
 
     private SysUser operator;
@@ -74,9 +76,11 @@ class ImportServiceTest {
         Visitor visitor = Visitor.builder().id(10L).name("Visitor One").build();
 
         when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
+        when(redisLock.tryLock(anyString(), any())).thenReturn("lock-value");
         when(sysUserMapper.selectById(1L)).thenReturn(operator);
         when(visitorService.registerOrFind(any())).thenReturn(visitor);
         when(blacklistService.check(any(), any(), any())).thenReturn(null);
+        when(appointmentMapper.countDuplicate(anyLong(), anyLong(), any(), any(), any())).thenReturn(0);
         when(appointmentMapper.insert(any())).thenReturn(1);
         when(importBatchMapper.insert(any())).thenReturn(1);
 
@@ -86,6 +90,7 @@ class ImportServiceTest {
         assertEquals(1, result.getSuccessCount());
         assertEquals(0, result.getFailCount());
         assertEquals(ImportStatusEnum.COMPLETED, result.getStatus());
+        verify(redisLock).unlock(anyString(), eq("lock-value"));
     }
 
     @Test
@@ -107,9 +112,11 @@ class ImportServiceTest {
         Visitor visitor = Visitor.builder().id(10L).name("Good Visitor").build();
 
         when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
+        when(redisLock.tryLock(anyString(), any())).thenReturn("lock-value");
         when(sysUserMapper.selectById(1L)).thenReturn(operator);
         when(visitorService.registerOrFind(any())).thenReturn(visitor);
         when(blacklistService.check(any(), any(), any())).thenReturn(null);
+        when(appointmentMapper.countDuplicate(anyLong(), anyLong(), any(), any(), any())).thenReturn(0);
         when(appointmentMapper.insert(any())).thenReturn(1);
         when(importBatchMapper.insert(any())).thenReturn(1);
 
@@ -134,6 +141,7 @@ class ImportServiceTest {
         request.setVisitors(List.of(badItem));
 
         when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
+        when(redisLock.tryLock(anyString(), any())).thenReturn("lock-value");
         when(importBatchMapper.insert(any())).thenReturn(1);
 
         ImportBatch result = importService.importMeetingVisitors(request);
@@ -160,6 +168,7 @@ class ImportServiceTest {
                 .id(1L).reason("Security threat").build();
 
         when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
+        when(redisLock.tryLock(anyString(), any())).thenReturn("lock-value");
         when(visitorService.registerOrFind(any())).thenReturn(visitor);
         when(blacklistService.check(anyString(), any(), anyString())).thenReturn(bl);
         when(importBatchMapper.insert(any())).thenReturn(1);
@@ -183,5 +192,52 @@ class ImportServiceTest {
         BizException ex = assertThrows(BizException.class,
                 () -> importService.importMeetingVisitors(request));
         assertEquals(ErrorCode.IMPORT_DATA_EMPTY, ex.getErrorCode());
+    }
+
+    @Test
+    void testImportDuplicateAppointment() {
+        MeetingVisitorImportRequest request = new MeetingVisitorImportRequest();
+        request.setHostId(1L);
+
+        MeetingVisitorImportItem item = new MeetingVisitorImportItem();
+        item.setName("Duplicate Visitor");
+        item.setPhone("13800000002");
+        item.setExpectedArrive(LocalDateTime.now().plusDays(1));
+        request.setVisitors(List.of(item));
+
+        Visitor visitor = Visitor.builder().id(10L).name("Duplicate Visitor").build();
+
+        when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
+        when(redisLock.tryLock(anyString(), any())).thenReturn("lock-value");
+        when(visitorService.registerOrFind(any())).thenReturn(visitor);
+        when(blacklistService.check(any(), any(), any())).thenReturn(null);
+        when(appointmentMapper.countDuplicate(anyLong(), anyLong(), any(), any(), any())).thenReturn(1);
+        when(importBatchMapper.insert(any())).thenReturn(1);
+
+        ImportBatch result = importService.importMeetingVisitors(request);
+
+        assertEquals(1, result.getTotalCount());
+        assertEquals(0, result.getSuccessCount());
+        assertEquals(1, result.getFailCount());
+        assertEquals(ImportStatusEnum.FAILED, result.getStatus());
+        assertTrue(result.getFailDetail().contains("Duplicate appointment"));
+    }
+
+    @Test
+    void testImportDuplicateBatchRejected() {
+        MeetingVisitorImportRequest request = new MeetingVisitorImportRequest();
+        request.setHostId(1L);
+
+        MeetingVisitorImportItem item = new MeetingVisitorImportItem();
+        item.setName("Visitor");
+        item.setExpectedArrive(LocalDateTime.now().plusDays(1));
+        request.setVisitors(List.of(item));
+
+        when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
+        when(redisLock.tryLock(anyString(), any())).thenReturn(null); // lock failed
+
+        BizException ex = assertThrows(BizException.class,
+                () -> importService.importMeetingVisitors(request));
+        assertEquals(ErrorCode.IMPORT_DUPLICATE, ex.getErrorCode());
     }
 }

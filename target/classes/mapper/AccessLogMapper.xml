@@ -21,4 +21,30 @@
         ORDER BY al.created_at DESC
     </select>
 
+    <select id="countUndepartedEntry" resultType="int">
+        SELECT COUNT(*) FROM access_log
+        WHERE appointment_id = #{appointmentId}
+          AND action = 'ENTRY'
+          AND result = 'PASS'
+          AND id NOT IN (
+              SELECT al_entry.id FROM access_log al_entry
+              INNER JOIN access_log al_exit
+                ON al_entry.appointment_id = al_exit.appointment_id
+                AND al_exit.action = 'EXIT'
+                AND al_exit.result = 'PASS'
+                AND al_exit.created_at > al_entry.created_at
+              WHERE al_entry.appointment_id = #{appointmentId}
+                AND al_entry.action = 'ENTRY'
+                AND al_entry.result = 'PASS'
+          )
+    </select>
+
+    <select id="countExistingPassLog" resultType="int">
+        SELECT COUNT(*) FROM access_log
+        WHERE pass_code_id = #{passCodeId}
+          AND appointment_id = #{appointmentId}
+          AND action = #{action}
+          AND result = 'PASS'
+    </select>
+
 </mapper>

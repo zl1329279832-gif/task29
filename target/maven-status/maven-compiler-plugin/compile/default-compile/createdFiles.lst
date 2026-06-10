@@ -31,6 +31,7 @@ com\visitor\controller\AuthController.class
 com\visitor\model\vo\LoginVO$LoginVOBuilder.class
 com\visitor\service\AppointmentService.class
 com\visitor\security\JwtTokenProvider.class
+com\visitor\service\WebSocketPushService$1.class
 com\visitor\model\entity\AnomalyRecord$AnomalyRecordBuilder.class
 com\visitor\model\enums\AccessResultEnum.class
 com\visitor\mapper\AnomalyRecordMapper.class

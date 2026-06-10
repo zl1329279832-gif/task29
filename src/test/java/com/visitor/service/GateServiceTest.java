@@ -19,6 +19,7 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 
+import java.time.LocalDateTime;
 import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -44,6 +45,7 @@ class GateServiceTest {
     private SysUser hostUser;
     private Visitor testVisitor;
     private Appointment testAppointment;
+    private PassCode testPassCode;
 
     @BeforeEach
     void setUp() {
@@ -56,6 +58,11 @@ class GateServiceTest {
         testAppointment = Appointment.builder()
                 .id(1L).appointNo("APT001").visitorId(10L).hostId(1L)
                 .status(AppointmentStatusEnum.APPROVED).build();
+        testPassCode = PassCode.builder()
+                .id(1L).code("valid.code").appointmentId(1L)
+                .maxUses(2).usedCount(0).status(PassCodeStatusEnum.ACTIVE)
+                .lockKey("visitor:scan:valid.code").lockValue("lock-123")
+                .build();
 
         var auth = new UsernamePasswordAuthenticationToken(
                 "security1", null,
@@ -69,14 +76,12 @@ class GateServiceTest {
         request.setPassCode("valid.code");
         request.setGateLocation("Main Gate");
 
-        PassCode passCode = PassCode.builder()
-                .id(1L).code("valid.code").appointmentId(1L)
-                .maxUses(2).usedCount(1).status(PassCodeStatusEnum.ACTIVE).build();
-
-        when(passCodeService.verifyAndUse("valid.code", "ENTRY")).thenReturn(passCode);
+        when(passCodeService.verify("valid.code")).thenReturn(testPassCode);
         when(appointmentService.getById(1L)).thenReturn(testAppointment);
         when(visitorService.getById(10L)).thenReturn(testVisitor);
         when(blacklistService.check(anyString(), any(), anyString())).thenReturn(null);
+        when(accessLogMapper.countUndepartedEntry(1L)).thenReturn(0);
+        when(accessLogMapper.countExistingPassLog(1L, 1L, "ENTRY")).thenReturn(0);
         when(sysUserMapper.findByUsername("security1")).thenReturn(securityUser);
         when(sysUserMapper.selectById(1L)).thenReturn(hostUser);
         when(accessLogMapper.insert(any())).thenReturn(1);
@@ -88,24 +93,27 @@ class GateServiceTest {
         assertEquals(AccessResultEnum.PASS, result.getResult());
         assertEquals("Main Gate", result.getGateLocation());
 
+        // verify() then markUsed() — correct order
+        verify(passCodeService).verify("valid.code");
+        verify(passCodeService).markUsed(testPassCode);
+        // Lock should NOT be released separately (markUsed handles it)
+        verify(passCodeService, never()).releaseScanLock(any());
+
         verify(appointmentService).markCheckedIn(1L);
         verify(visitorService).incrementVisitCount(10L);
-        verify(webSocketPushService).pushVisitorArrived("1", "Li Si", "APT001");
+        verify(webSocketPushService).pushAfterCommit(any());
     }
 
     @Test
-    void testCheckin_BlacklistedVisitor() {
+    void testCheckin_BlacklistedVisitor_LockReleasedWithoutConsuming() {
         GateCheckinRequest request = new GateCheckinRequest();
         request.setPassCode("valid.code");
         request.setGateLocation("Main Gate");
 
-        PassCode passCode = PassCode.builder()
-                .id(1L).code("valid.code").appointmentId(1L).build();
-
         Blacklist blacklist = Blacklist.builder()
                 .id(1L).name("Li Si").reason("Previous incident").build();
 
-        when(passCodeService.verifyAndUse("valid.code", "ENTRY")).thenReturn(passCode);
+        when(passCodeService.verify("valid.code")).thenReturn(testPassCode);
         when(appointmentService.getById(1L)).thenReturn(testAppointment);
         when(visitorService.getById(10L)).thenReturn(testVisitor);
         when(blacklistService.check(anyString(), any(), anyString())).thenReturn(blacklist);
@@ -114,8 +122,92 @@ class GateServiceTest {
         BizException ex = assertThrows(BizException.class, () -> gateService.checkin(request));
         assertEquals(ErrorCode.BLACKLIST_HIT, ex.getErrorCode());
 
-        verify(webSocketPushService).pushBlacklistAlert(eq("Li Si"), eq("Previous incident"), eq("Main Gate"));
+        // Code should NOT be consumed — lock released without markUsed
+        verify(passCodeService, never()).markUsed(any());
+        verify(passCodeService).releaseScanLock(testPassCode);
+
+        // Blacklist alert and anomaly still recorded
         verify(anomalyRecordMapper).insert(any());
+        verify(webSocketPushService).pushAfterCommit(any());
+    }
+
+    @Test
+    void testCheckin_DuplicateEntry_UndepartedVisitor() {
+        GateCheckinRequest request = new GateCheckinRequest();
+        request.setPassCode("valid.code");
+        request.setGateLocation("Main Gate");
+
+        when(passCodeService.verify("valid.code")).thenReturn(testPassCode);
+        when(appointmentService.getById(1L)).thenReturn(testAppointment);
+        when(visitorService.getById(10L)).thenReturn(testVisitor);
+        when(blacklistService.check(anyString(), any(), anyString())).thenReturn(null);
+        when(accessLogMapper.countUndepartedEntry(1L)).thenReturn(1); // has undeparted entry
+
+        BizException ex = assertThrows(BizException.class, () -> gateService.checkin(request));
+        assertEquals(ErrorCode.DUPLICATE_ENTRY, ex.getErrorCode());
+
+        // Code NOT consumed, lock released
+        verify(passCodeService, never()).markUsed(any());
+        verify(passCodeService).releaseScanLock(testPassCode);
+        // Anomaly recorded
+        verify(anomalyRecordMapper).insert(any());
+    }
+
+    @Test
+    void testCheckin_IdempotentLog_AlreadyCheckedIn() {
+        GateCheckinRequest request = new GateCheckinRequest();
+        request.setPassCode("valid.code");
+        request.setGateLocation("Main Gate");
+
+        when(passCodeService.verify("valid.code")).thenReturn(testPassCode);
+        when(appointmentService.getById(1L)).thenReturn(testAppointment);
+        when(visitorService.getById(10L)).thenReturn(testVisitor);
+        when(blacklistService.check(anyString(), any(), anyString())).thenReturn(null);
+        when(accessLogMapper.countUndepartedEntry(1L)).thenReturn(0);
+        when(accessLogMapper.countExistingPassLog(1L, 1L, "ENTRY")).thenReturn(1); // already logged
+
+        BizException ex = assertThrows(BizException.class, () -> gateService.checkin(request));
+        assertEquals(ErrorCode.ALREADY_CHECKED_IN, ex.getErrorCode());
+
+        verify(passCodeService, never()).markUsed(any());
+        verify(passCodeService).releaseScanLock(testPassCode);
+    }
+
+    @Test
+    void testCheckin_AppointmentNotApproved() {
+        testAppointment.setStatus(AppointmentStatusEnum.CHECKED_IN);
+
+        GateCheckinRequest request = new GateCheckinRequest();
+        request.setPassCode("valid.code");
+        request.setGateLocation("Main Gate");
+
+        when(passCodeService.verify("valid.code")).thenReturn(testPassCode);
+        when(appointmentService.getById(1L)).thenReturn(testAppointment);
+
+        BizException ex = assertThrows(BizException.class, () -> gateService.checkin(request));
+        assertEquals(ErrorCode.APPOINTMENT_STATUS_INVALID, ex.getErrorCode());
+
+        // Lock released without consuming
+        verify(passCodeService, never()).markUsed(any());
+        verify(passCodeService).releaseScanLock(testPassCode);
+    }
+
+    @Test
+    void testCheckin_EarlyScan_CodeNotConsumed() {
+        GateCheckinRequest request = new GateCheckinRequest();
+        request.setPassCode("valid.code");
+        request.setGateLocation("Main Gate");
+
+        // verify() throws NOT_YET_VALID — code status unchanged
+        when(passCodeService.verify("valid.code"))
+                .thenThrow(new BizException(ErrorCode.PASS_CODE_NOT_YET_VALID));
+
+        BizException ex = assertThrows(BizException.class, () -> gateService.checkin(request));
+        assertEquals(ErrorCode.PASS_CODE_NOT_YET_VALID, ex.getErrorCode());
+
+        // Nothing consumed or logged
+        verify(passCodeService, never()).markUsed(any());
+        verify(accessLogMapper, never()).insert(any());
     }
 
     @Test

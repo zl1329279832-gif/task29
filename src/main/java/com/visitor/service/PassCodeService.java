@@ -75,16 +75,21 @@ public class PassCodeService {
     }
 
     /**
-     * Verify and use a pass code (for gate check-in/check-out)
-     * Uses distributed lock to prevent concurrent scanning
+     * Verify a pass code without consuming it.
+     * Acquires a distributed lock to prevent concurrent scanning of the same code.
+     * Returns the PassCode if valid; caller must call markUsed() after all business
+     * checks pass (blacklist, duplicate entry, etc.).
+     *
+     * @return PassCode if valid
+     * @throws BizException if the code is invalid, expired, revoked, used up, or not yet valid
      */
-    public PassCode verifyAndUse(String code, String scanPurpose) {
+    public PassCode verify(String code) {
         // 1. Verify HMAC signature
         if (!QrCodeUtil.verifyPassCode(code, hmacKey)) {
             throw new BizException(ErrorCode.PASS_CODE_INVALID);
         }
 
-        // 2. Acquire distributed lock to prevent duplicate scanning
+        // 2. Acquire distributed lock to prevent concurrent scanning
         String lockKey = PASS_CODE_SCAN_LOCK_PREFIX + code;
         String lockValue = redisLock.tryLock(lockKey);
         if (lockValue == null) {
@@ -99,26 +104,31 @@ public class PassCodeService {
             }
 
             // 4. Check status
-            if (passCode.getStatus() == PassCodeStatusEnum.EXPIRED) {
-                throw new BizException(ErrorCode.PASS_CODE_EXPIRED);
-            }
             if (passCode.getStatus() == PassCodeStatusEnum.REVOKED) {
                 throw new BizException(ErrorCode.PASS_CODE_REVOKED);
+            }
+            if (passCode.getStatus() == PassCodeStatusEnum.EXPIRED) {
+                throw new BizException(ErrorCode.PASS_CODE_EXPIRED);
             }
             if (passCode.getStatus() == PassCodeStatusEnum.USED_UP) {
                 throw new BizException(ErrorCode.PASS_CODE_USED_UP);
             }
 
-            // 5. Check validity period
+            // 5. Check validity period — separate early scan from true expiry
             LocalDateTime now = LocalDateTime.now();
-            if (now.isBefore(passCode.getValidFrom()) || now.isAfter(passCode.getValidTo())) {
+            if (now.isBefore(passCode.getValidFrom())) {
+                // Early scan: code is not yet valid, do NOT change status
+                throw new BizException(ErrorCode.PASS_CODE_NOT_YET_VALID);
+            }
+            if (now.isAfter(passCode.getValidTo())) {
+                // True expiry: mark as EXPIRED in DB and cache
                 passCode.setStatus(PassCodeStatusEnum.EXPIRED);
                 passCodeMapper.updateById(passCode);
                 evictCache(code);
                 throw new BizException(ErrorCode.PASS_CODE_EXPIRED);
             }
 
-            // 6. Check usage count
+            // 6. Check usage count (verify only, do not increment)
             if (passCode.getUsedCount() >= passCode.getMaxUses()) {
                 passCode.setStatus(PassCodeStatusEnum.USED_UP);
                 passCodeMapper.updateById(passCode);
@@ -126,18 +136,57 @@ public class PassCodeService {
                 throw new BizException(ErrorCode.PASS_CODE_USED_UP);
             }
 
-            // 7. Increment usage count
+            // Store lock info on the pass code for later unlock in markUsed or releaseLock
+            passCode.setLockKey(lockKey);
+            passCode.setLockValue(lockValue);
+
+            return passCode;
+        } catch (Exception e) {
+            // Release lock on any failure — caller won't call markUsed
+            redisLock.unlock(lockKey, lockValue);
+            throw e;
+        }
+    }
+
+    /**
+     * Consume a verified pass code: increment usage count and update status.
+     * Must be called after verify() and after all business checks pass.
+     * Releases the distributed lock acquired during verify().
+     */
+    public void markUsed(PassCode passCode) {
+        try {
             passCode.setUsedCount(passCode.getUsedCount() + 1);
             if (passCode.getUsedCount() >= passCode.getMaxUses()) {
                 passCode.setStatus(PassCodeStatusEnum.USED_UP);
             }
             passCodeMapper.updateById(passCode);
             cachePassCode(passCode);
-
-            return passCode;
         } finally {
-            redisLock.unlock(lockKey, lockValue);
+            // Always release the lock
+            releaseScanLock(passCode);
         }
+    }
+
+    /**
+     * Release the scan lock without consuming. Used when business checks fail
+     * after verify() but before markUsed() (e.g., blacklist hit, duplicate entry).
+     */
+    public void releaseScanLock(PassCode passCode) {
+        if (passCode.getLockKey() != null && passCode.getLockValue() != null) {
+            redisLock.unlock(passCode.getLockKey(), passCode.getLockValue());
+            passCode.setLockKey(null);
+            passCode.setLockValue(null);
+        }
+    }
+
+    /**
+     * Verify and use a pass code in one step (legacy method).
+     * Retained for backward compatibility with checkout flow.
+     */
+    public PassCode verifyAndUse(String code, String scanPurpose) {
+        PassCode passCode = verify(code);
+        markUsed(passCode);
+        return passCode;
     }
 
     /**

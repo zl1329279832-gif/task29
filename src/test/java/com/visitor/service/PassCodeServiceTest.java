@@ -95,6 +95,212 @@ class PassCodeServiceTest {
         verify(passCodeMapper, never()).insert(any());
     }
 
+    // ========== verify() + markUsed() split tests ==========
+
+    @Test
+    void testVerify_Success() {
+        String code = QrCodeUtil.generatePassCode(HMAC_KEY);
+        PassCode passCode = PassCode.builder()
+                .id(1L).code(code).appointmentId(1L)
+                .maxUses(2).usedCount(0)
+                .validFrom(LocalDateTime.now().minusHours(1))
+                .validTo(LocalDateTime.now().plusHours(3))
+                .status(PassCodeStatusEnum.ACTIVE)
+                .build();
+
+        when(redisLock.tryLock(anyString())).thenReturn("lock-value");
+        when(passCodeMapper.findByCode(code)).thenReturn(passCode);
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+
+        PassCode result = passCodeService.verify(code);
+
+        assertNotNull(result);
+        // verify() should NOT increment usedCount
+        assertEquals(0, result.getUsedCount());
+        assertEquals(PassCodeStatusEnum.ACTIVE, result.getStatus());
+        // Lock info should be stored on PassCode for later release
+        assertNotNull(result.getLockKey());
+        assertNotNull(result.getLockValue());
+        // Lock should NOT be released yet
+        verify(redisLock, never()).unlock(anyString(), anyString());
+    }
+
+    @Test
+    void testMarkUsed_IncrementsAndReleasesLock() {
+        PassCode passCode = PassCode.builder()
+                .id(1L).code("test.code").appointmentId(1L)
+                .maxUses(2).usedCount(0)
+                .status(PassCodeStatusEnum.ACTIVE)
+                .build();
+        passCode.setLockKey("visitor:scan:test.code");
+        passCode.setLockValue("lock-value");
+
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+
+        passCodeService.markUsed(passCode);
+
+        assertEquals(1, passCode.getUsedCount());
+        assertEquals(PassCodeStatusEnum.ACTIVE, passCode.getStatus());
+        verify(passCodeMapper).updateById(passCode);
+        // Lock should be released after markUsed
+        verify(redisLock).unlock("visitor:scan:test.code", "lock-value");
+    }
+
+    @Test
+    void testMarkUsed_IncrementsToMax_SetsUsedUp() {
+        PassCode passCode = PassCode.builder()
+                .id(1L).code("test.code").appointmentId(1L)
+                .maxUses(2).usedCount(1)
+                .status(PassCodeStatusEnum.ACTIVE)
+                .build();
+        passCode.setLockKey("visitor:scan:test.code");
+        passCode.setLockValue("lock-value");
+
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+
+        passCodeService.markUsed(passCode);
+
+        assertEquals(2, passCode.getUsedCount());
+        assertEquals(PassCodeStatusEnum.USED_UP, passCode.getStatus());
+    }
+
+    @Test
+    void testReleaseScanLock_WithoutConsuming() {
+        PassCode passCode = PassCode.builder()
+                .id(1L).code("test.code").appointmentId(1L)
+                .maxUses(2).usedCount(0)
+                .status(PassCodeStatusEnum.ACTIVE)
+                .build();
+        passCode.setLockKey("visitor:scan:test.code");
+        passCode.setLockValue("lock-value");
+
+        passCodeService.releaseScanLock(passCode);
+
+        // Lock released
+        verify(redisLock).unlock("visitor:scan:test.code", "lock-value");
+        // Lock info cleared
+        assertNull(passCode.getLockKey());
+        assertNull(passCode.getLockValue());
+        // usedCount NOT incremented
+        assertEquals(0, passCode.getUsedCount());
+        // No DB update
+        verify(passCodeMapper, never()).updateById(any());
+    }
+
+    // ========== verify() failure scenarios ==========
+
+    @Test
+    void testVerify_InvalidSignature() {
+        BizException ex = assertThrows(BizException.class,
+                () -> passCodeService.verify("invalid.code"));
+        assertEquals(ErrorCode.PASS_CODE_INVALID, ex.getErrorCode());
+    }
+
+    @Test
+    void testVerify_DuplicateScan_LockFailed() {
+        String code = QrCodeUtil.generatePassCode(HMAC_KEY);
+        when(redisLock.tryLock(anyString())).thenReturn(null);
+
+        BizException ex = assertThrows(BizException.class,
+                () -> passCodeService.verify(code));
+        assertEquals(ErrorCode.PASS_CODE_DUPLICATE_SCAN, ex.getErrorCode());
+    }
+
+    @Test
+    void testVerify_NotYetValid_EarlyScan() {
+        String code = QrCodeUtil.generatePassCode(HMAC_KEY);
+        PassCode passCode = PassCode.builder()
+                .id(1L).code(code)
+                .maxUses(2).usedCount(0)
+                .validFrom(LocalDateTime.now().plusHours(2)) // future
+                .validTo(LocalDateTime.now().plusHours(5))
+                .status(PassCodeStatusEnum.ACTIVE)
+                .build();
+
+        when(redisLock.tryLock(anyString())).thenReturn("lock-value");
+        when(passCodeMapper.findByCode(code)).thenReturn(passCode);
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+
+        BizException ex = assertThrows(BizException.class,
+                () -> passCodeService.verify(code));
+
+        assertEquals(ErrorCode.PASS_CODE_NOT_YET_VALID, ex.getErrorCode());
+        // Status should NOT change — code is still valid for future use
+        assertEquals(PassCodeStatusEnum.ACTIVE, passCode.getStatus());
+        verify(passCodeMapper, never()).updateById(any());
+        // Lock should be released on failure
+        verify(redisLock).unlock(anyString(), eq("lock-value"));
+    }
+
+    @Test
+    void testVerify_Expired_TrueExpiry() {
+        String code = QrCodeUtil.generatePassCode(HMAC_KEY);
+        PassCode passCode = PassCode.builder()
+                .id(1L).code(code)
+                .maxUses(2).usedCount(0)
+                .validFrom(LocalDateTime.now().minusHours(5))
+                .validTo(LocalDateTime.now().minusHours(1)) // past
+                .status(PassCodeStatusEnum.ACTIVE)
+                .build();
+
+        when(redisLock.tryLock(anyString())).thenReturn("lock-value");
+        when(passCodeMapper.findByCode(code)).thenReturn(passCode);
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+
+        BizException ex = assertThrows(BizException.class,
+                () -> passCodeService.verify(code));
+
+        assertEquals(ErrorCode.PASS_CODE_EXPIRED, ex.getErrorCode());
+        // Status should be marked EXPIRED
+        assertEquals(PassCodeStatusEnum.EXPIRED, passCode.getStatus());
+        verify(passCodeMapper).updateById(passCode);
+        verify(redisLock).unlock(anyString(), eq("lock-value"));
+    }
+
+    @Test
+    void testVerify_UsedUp() {
+        String code = QrCodeUtil.generatePassCode(HMAC_KEY);
+        PassCode passCode = PassCode.builder()
+                .id(1L).code(code)
+                .maxUses(2).usedCount(2)
+                .validFrom(LocalDateTime.now().minusHours(1))
+                .validTo(LocalDateTime.now().plusHours(3))
+                .status(PassCodeStatusEnum.ACTIVE)
+                .build();
+
+        when(redisLock.tryLock(anyString())).thenReturn("lock-value");
+        when(passCodeMapper.findByCode(code)).thenReturn(passCode);
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+
+        BizException ex = assertThrows(BizException.class,
+                () -> passCodeService.verify(code));
+        assertEquals(ErrorCode.PASS_CODE_USED_UP, ex.getErrorCode());
+        verify(redisLock).unlock(anyString(), eq("lock-value"));
+    }
+
+    @Test
+    void testVerify_Revoked() {
+        String code = QrCodeUtil.generatePassCode(HMAC_KEY);
+        PassCode passCode = PassCode.builder()
+                .id(1L).code(code)
+                .maxUses(2).usedCount(0)
+                .validFrom(LocalDateTime.now().minusHours(1))
+                .validTo(LocalDateTime.now().plusHours(3))
+                .status(PassCodeStatusEnum.REVOKED)
+                .build();
+
+        when(redisLock.tryLock(anyString())).thenReturn("lock-value");
+        when(passCodeMapper.findByCode(code)).thenReturn(passCode);
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+
+        BizException ex = assertThrows(BizException.class,
+                () -> passCodeService.verify(code));
+        assertEquals(ErrorCode.PASS_CODE_REVOKED, ex.getErrorCode());
+        verify(redisLock).unlock(anyString(), eq("lock-value"));
+    }
+
+    // ========== verifyAndUse() legacy tests ==========
+
     @Test
     void testVerifyAndUse_Success() {
         String code = QrCodeUtil.generatePassCode(HMAC_KEY);
@@ -113,108 +319,11 @@ class PassCodeServiceTest {
         PassCode result = passCodeService.verifyAndUse(code, "ENTRY");
 
         assertNotNull(result);
-        assertEquals(1, passCode.getUsedCount());
+        assertEquals(1, result.getUsedCount());
         verify(redisLock).unlock(anyString(), eq("lock-value"));
     }
 
-    @Test
-    void testVerifyAndUse_InvalidSignature() {
-        BizException ex = assertThrows(BizException.class,
-                () -> passCodeService.verifyAndUse("invalid.code", "ENTRY"));
-        assertEquals(ErrorCode.PASS_CODE_INVALID, ex.getErrorCode());
-    }
-
-    @Test
-    void testVerifyAndUse_DuplicateScan() {
-        String code = QrCodeUtil.generatePassCode(HMAC_KEY);
-        when(redisLock.tryLock(anyString())).thenReturn(null);
-
-        BizException ex = assertThrows(BizException.class,
-                () -> passCodeService.verifyAndUse(code, "ENTRY"));
-        assertEquals(ErrorCode.PASS_CODE_DUPLICATE_SCAN, ex.getErrorCode());
-    }
-
-    @Test
-    void testVerifyAndUse_Expired() {
-        String code = QrCodeUtil.generatePassCode(HMAC_KEY);
-        PassCode passCode = PassCode.builder()
-                .id(1L).code(code)
-                .maxUses(2).usedCount(0)
-                .validFrom(LocalDateTime.now().minusHours(5))
-                .validTo(LocalDateTime.now().minusHours(1))
-                .status(PassCodeStatusEnum.ACTIVE)
-                .build();
-
-        when(redisLock.tryLock(anyString())).thenReturn("lock-value");
-        when(passCodeMapper.findByCode(code)).thenReturn(passCode);
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-
-        BizException ex = assertThrows(BizException.class,
-                () -> passCodeService.verifyAndUse(code, "ENTRY"));
-        assertEquals(ErrorCode.PASS_CODE_EXPIRED, ex.getErrorCode());
-        assertEquals(PassCodeStatusEnum.EXPIRED, passCode.getStatus());
-    }
-
-    @Test
-    void testVerifyAndUse_UsedUp() {
-        String code = QrCodeUtil.generatePassCode(HMAC_KEY);
-        PassCode passCode = PassCode.builder()
-                .id(1L).code(code)
-                .maxUses(2).usedCount(2)
-                .validFrom(LocalDateTime.now().minusHours(1))
-                .validTo(LocalDateTime.now().plusHours(3))
-                .status(PassCodeStatusEnum.ACTIVE)
-                .build();
-
-        when(redisLock.tryLock(anyString())).thenReturn("lock-value");
-        when(passCodeMapper.findByCode(code)).thenReturn(passCode);
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-
-        BizException ex = assertThrows(BizException.class,
-                () -> passCodeService.verifyAndUse(code, "ENTRY"));
-        assertEquals(ErrorCode.PASS_CODE_USED_UP, ex.getErrorCode());
-    }
-
-    @Test
-    void testVerifyAndUse_Revoked() {
-        String code = QrCodeUtil.generatePassCode(HMAC_KEY);
-        PassCode passCode = PassCode.builder()
-                .id(1L).code(code)
-                .maxUses(2).usedCount(0)
-                .validFrom(LocalDateTime.now().minusHours(1))
-                .validTo(LocalDateTime.now().plusHours(3))
-                .status(PassCodeStatusEnum.REVOKED)
-                .build();
-
-        when(redisLock.tryLock(anyString())).thenReturn("lock-value");
-        when(passCodeMapper.findByCode(code)).thenReturn(passCode);
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-
-        BizException ex = assertThrows(BizException.class,
-                () -> passCodeService.verifyAndUse(code, "ENTRY"));
-        assertEquals(ErrorCode.PASS_CODE_REVOKED, ex.getErrorCode());
-    }
-
-    @Test
-    void testVerifyAndUse_IncrementsToMax() {
-        String code = QrCodeUtil.generatePassCode(HMAC_KEY);
-        PassCode passCode = PassCode.builder()
-                .id(1L).code(code)
-                .maxUses(2).usedCount(1)
-                .validFrom(LocalDateTime.now().minusHours(1))
-                .validTo(LocalDateTime.now().plusHours(3))
-                .status(PassCodeStatusEnum.ACTIVE)
-                .build();
-
-        when(redisLock.tryLock(anyString())).thenReturn("lock-value");
-        when(passCodeMapper.findByCode(code)).thenReturn(passCode);
-        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
-
-        passCodeService.verifyAndUse(code, "EXIT");
-
-        assertEquals(2, passCode.getUsedCount());
-        assertEquals(PassCodeStatusEnum.USED_UP, passCode.getStatus());
-    }
+    // ========== revokeByAppointmentId tests ==========
 
     @Test
     void testRevokeByAppointmentId() {

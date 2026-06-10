@@ -14,12 +14,14 @@ import com.visitor.model.entity.Visitor;
 import com.visitor.model.enums.AppointmentStatusEnum;
 import com.visitor.model.enums.RoleEnum;
 import com.visitor.model.vo.AppointmentVO;
+import com.visitor.util.RedisLock;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
@@ -36,6 +38,9 @@ public class AppointmentService {
     private final BlacklistService blacklistService;
     private final PassCodeService passCodeService;
     private final WebSocketPushService webSocketPushService;
+    private final RedisLock redisLock;
+
+    private static final String RESCHEDULE_LOCK_PREFIX = "visitor:reschedule:";
 
     @Transactional
     public Appointment create(AppointmentCreateRequest request) {
@@ -73,7 +78,8 @@ public class AppointmentService {
 
         appointmentMapper.insert(appointment);
 
-        webSocketPushService.pushApprovalReminder(appointNo, visitor.getName(), host.getRealName());
+        webSocketPushService.pushAfterCommit(() ->
+                webSocketPushService.pushApprovalReminder(appointNo, visitor.getName(), host.getRealName()));
 
         log.info("Created appointment {} for visitor {} hosted by {}", appointNo, visitor.getName(), host.getRealName());
         return appointment;
@@ -132,6 +138,10 @@ public class AppointmentService {
             throw new BizException(ErrorCode.APPOINTMENT_EXPIRED);
         }
 
+        // Recheck blacklist before approval
+        Visitor visitor = visitorService.getById(appointment.getVisitorId());
+        blacklistService.assertNotBlacklisted(visitor.getName(), visitor.getIdCard(), visitor.getPhone());
+
         appointment.setStatus(AppointmentStatusEnum.APPROVED);
         appointment.setApprovedBy(approverId);
         appointment.setApprovedAt(LocalDateTime.now());
@@ -141,8 +151,10 @@ public class AppointmentService {
 
         SysUser host = sysUserMapper.selectById(appointment.getHostId());
         if (host != null) {
-            webSocketPushService.pushApprovalResult(
-                    host.getId().toString(), appointment.getAppointNo(), true, remark);
+            String hostId = host.getId().toString();
+            String aptNo = appointment.getAppointNo();
+            webSocketPushService.pushAfterCommit(() ->
+                    webSocketPushService.pushApprovalResult(hostId, aptNo, true, remark));
         }
 
         log.info("Approved appointment {} by approver {}", appointmentId, approverId);
@@ -166,8 +178,10 @@ public class AppointmentService {
 
         SysUser host = sysUserMapper.selectById(appointment.getHostId());
         if (host != null) {
-            webSocketPushService.pushApprovalResult(
-                    host.getId().toString(), appointment.getAppointNo(), false, reason);
+            String hostId = host.getId().toString();
+            String aptNo = appointment.getAppointNo();
+            webSocketPushService.pushAfterCommit(() ->
+                    webSocketPushService.pushApprovalResult(hostId, aptNo, false, reason));
         }
 
         log.info("Rejected appointment {} by approver {}", appointmentId, approverId);
@@ -200,49 +214,73 @@ public class AppointmentService {
         log.info("Cancelled appointment {}", appointmentId);
     }
 
+    /**
+     * Reschedule an appointment: cancel old + revoke old code + blacklist recheck + create new.
+     * Uses a distributed lock to prevent concurrent reschedule of the same appointment.
+     */
     @Transactional
     public Appointment reschedule(Long appointmentId, AppointmentRescheduleRequest request) {
         String username = SecurityContextHolder.getContext().getAuthentication().getName();
         SysUser user = sysUserMapper.findByUsername(username);
 
-        Appointment oldAppointment = appointmentMapper.selectById(appointmentId);
-        if (oldAppointment == null) {
-            throw new BizException(ErrorCode.APPOINTMENT_NOT_FOUND);
+        // Distributed lock to prevent concurrent reschedule
+        String lockKey = RESCHEDULE_LOCK_PREFIX + appointmentId;
+        String lockValue = redisLock.tryLock(lockKey, Duration.ofSeconds(15));
+        if (lockValue == null) {
+            throw new BizException(ErrorCode.APPOINTMENT_STATUS_INVALID, "reschedule in progress, please retry");
         }
 
-        if (user.getRole() == RoleEnum.EMPLOYEE && !oldAppointment.getHostId().equals(user.getId())) {
-            throw new BizException(ErrorCode.DATA_ACCESS_DENIED);
+        try {
+            Appointment oldAppointment = appointmentMapper.selectById(appointmentId);
+            if (oldAppointment == null) {
+                throw new BizException(ErrorCode.APPOINTMENT_NOT_FOUND);
+            }
+
+            if (user.getRole() == RoleEnum.EMPLOYEE && !oldAppointment.getHostId().equals(user.getId())) {
+                throw new BizException(ErrorCode.DATA_ACCESS_DENIED);
+            }
+
+            if (oldAppointment.getStatus() != AppointmentStatusEnum.PENDING
+                    && oldAppointment.getStatus() != AppointmentStatusEnum.APPROVED) {
+                throw new BizException(ErrorCode.RESCHEDULE_NOT_ALLOWED);
+            }
+
+            // Recheck blacklist before creating the new appointment
+            Visitor visitor = visitorService.getById(oldAppointment.getVisitorId());
+            blacklistService.assertNotBlacklisted(visitor.getName(), visitor.getIdCard(), visitor.getPhone());
+
+            // Cancel old appointment and revoke its pass code
+            oldAppointment.setStatus(AppointmentStatusEnum.CANCELLED);
+            appointmentMapper.updateById(oldAppointment);
+            passCodeService.revokeByAppointmentId(appointmentId);
+
+            // Create new appointment
+            String newAppointNo = generateAppointNo();
+            Appointment newAppointment = Appointment.builder()
+                    .appointNo(newAppointNo)
+                    .visitorId(oldAppointment.getVisitorId())
+                    .hostId(oldAppointment.getHostId())
+                    .visitType(oldAppointment.getVisitType())
+                    .purpose(oldAppointment.getPurpose())
+                    .expectedArrive(request.getExpectedArrive())
+                    .expectedLeave(request.getExpectedLeave())
+                    .status(AppointmentStatusEnum.PENDING)
+                    .rescheduleFrom(appointmentId)
+                    .build();
+
+            appointmentMapper.insert(newAppointment);
+
+            String vName = visitor.getName();
+            String hostName = user.getRealName();
+            webSocketPushService.pushAfterCommit(() ->
+                    webSocketPushService.pushApprovalReminder(newAppointNo, vName, hostName));
+
+            log.info("Rescheduled appointment {} -> {}", appointmentId, newAppointNo);
+            return newAppointment;
+
+        } finally {
+            redisLock.unlock(lockKey, lockValue);
         }
-
-        if (oldAppointment.getStatus() != AppointmentStatusEnum.PENDING
-                && oldAppointment.getStatus() != AppointmentStatusEnum.APPROVED) {
-            throw new BizException(ErrorCode.RESCHEDULE_NOT_ALLOWED);
-        }
-
-        oldAppointment.setStatus(AppointmentStatusEnum.CANCELLED);
-        appointmentMapper.updateById(oldAppointment);
-        passCodeService.revokeByAppointmentId(appointmentId);
-
-        Appointment newAppointment = Appointment.builder()
-                .appointNo(generateAppointNo())
-                .visitorId(oldAppointment.getVisitorId())
-                .hostId(oldAppointment.getHostId())
-                .visitType(oldAppointment.getVisitType())
-                .purpose(oldAppointment.getPurpose())
-                .expectedArrive(request.getExpectedArrive())
-                .expectedLeave(request.getExpectedLeave())
-                .status(AppointmentStatusEnum.PENDING)
-                .rescheduleFrom(appointmentId)
-                .build();
-
-        appointmentMapper.insert(newAppointment);
-
-        Visitor visitor = visitorService.getById(oldAppointment.getVisitorId());
-        webSocketPushService.pushApprovalReminder(
-                newAppointment.getAppointNo(), visitor.getName(), user.getRealName());
-
-        log.info("Rescheduled appointment {} -> {}", appointmentId, newAppointment.getAppointNo());
-        return newAppointment;
     }
 
     @Transactional
@@ -276,8 +314,30 @@ public class AppointmentService {
         for (Appointment appt : expired) {
             appt.setStatus(AppointmentStatusEnum.EXPIRED);
             appointmentMapper.updateById(appt);
+            // Also revoke any pass codes for expired appointments
+            passCodeService.revokeByAppointmentId(appt.getId());
         }
         return expired.size();
+    }
+
+    /**
+     * Cancel all PENDING/APPROVED appointments for a visitor and revoke their pass codes.
+     * Called when a visitor is added to the blacklist.
+     */
+    @Transactional
+    public int cancelAllForVisitor(Long visitorId) {
+        LambdaQueryWrapper<Appointment> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(Appointment::getVisitorId, visitorId)
+                .in(Appointment::getStatus, AppointmentStatusEnum.PENDING, AppointmentStatusEnum.APPROVED);
+        List<Appointment> activeAppointments = appointmentMapper.selectList(wrapper);
+
+        for (Appointment appt : activeAppointments) {
+            appt.setStatus(AppointmentStatusEnum.CANCELLED);
+            appointmentMapper.updateById(appt);
+            passCodeService.revokeByAppointmentId(appt.getId());
+            log.info("Cancelled appointment {} due to blacklist", appt.getAppointNo());
+        }
+        return activeAppointments.size();
     }
 
     public Appointment getById(Long id) {

@@ -3,8 +3,10 @@ package com.visitor.service;
 import com.visitor.exception.BizException;
 import com.visitor.exception.ErrorCode;
 import com.visitor.mapper.BlacklistMapper;
+import com.visitor.mapper.VisitorMapper;
 import com.visitor.model.dto.BlacklistRequest;
 import com.visitor.model.entity.Blacklist;
+import com.visitor.model.entity.Visitor;
 import com.visitor.model.enums.BlacklistStatusEnum;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -27,8 +29,9 @@ class BlacklistServiceTest {
     @InjectMocks
     private BlacklistService blacklistService;
 
-    @Mock
-    private BlacklistMapper blacklistMapper;
+    @Mock private BlacklistMapper blacklistMapper;
+    @Mock private VisitorMapper visitorMapper;
+    @Mock private AppointmentService appointmentService;
 
     @Test
     void testCheck_NotBlacklisted() {
@@ -113,6 +116,58 @@ class BlacklistServiceTest {
 
         BizException ex = assertThrows(BizException.class, () -> blacklistService.add(request));
         assertEquals(ErrorCode.VISITOR_BLACKLISTED, ex.getErrorCode());
+    }
+
+    @Test
+    void testAdd_CascadeCancelAppointments() {
+        var auth = new UsernamePasswordAuthenticationToken(
+                "admin1", null,
+                Collections.singletonList(new SimpleGrantedAuthority("ROLE_ADMIN")));
+        SecurityContextHolder.getContext().setAuthentication(auth);
+
+        BlacklistRequest request = new BlacklistRequest();
+        request.setName("Bad Person");
+        request.setPhone("13900139000");
+        request.setIdCard("ID12345");
+        request.setReason("Security threat");
+
+        Visitor visitorByPhone = Visitor.builder().id(10L).name("Bad Person").build();
+        Visitor visitorByIdCard = Visitor.builder().id(10L).name("Bad Person").build();
+
+        when(blacklistMapper.checkBlacklist(anyString(), anyString(), anyString())).thenReturn(null);
+        when(blacklistMapper.insert(any())).thenReturn(1);
+        when(visitorMapper.findByPhone("13900139000")).thenReturn(visitorByPhone);
+        when(visitorMapper.findByIdCard("ID12345")).thenReturn(visitorByIdCard);
+        when(appointmentService.cancelAllForVisitor(10L)).thenReturn(3);
+
+        Blacklist result = blacklistService.add(request);
+
+        assertNotNull(result);
+        // Cascade cancel should be called for the matched visitor
+        verify(appointmentService).cancelAllForVisitor(10L);
+    }
+
+    @Test
+    void testAdd_CascadeNoMatchingVisitor() {
+        var auth = new UsernamePasswordAuthenticationToken(
+                "admin1", null,
+                Collections.singletonList(new SimpleGrantedAuthority("ROLE_ADMIN")));
+        SecurityContextHolder.getContext().setAuthentication(auth);
+
+        BlacklistRequest request = new BlacklistRequest();
+        request.setName("Unknown Person");
+        request.setPhone("13999999999");
+        request.setReason("Preventive");
+
+        when(blacklistMapper.checkBlacklist(anyString(), any(), anyString())).thenReturn(null);
+        when(blacklistMapper.insert(any())).thenReturn(1);
+        when(visitorMapper.findByPhone("13999999999")).thenReturn(null);
+
+        Blacklist result = blacklistService.add(request);
+
+        assertNotNull(result);
+        // No visitor found — no cascade
+        verify(appointmentService, never()).cancelAllForVisitor(anyLong());
     }
 
     @Test

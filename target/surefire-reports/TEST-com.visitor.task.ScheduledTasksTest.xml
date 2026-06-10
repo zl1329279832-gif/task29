@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report-3.0.xsd" version="3.0" name="com.visitor.service.GateServiceTest" time="0.214" tests="9" errors="0" skipped="0" failures="0">
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report-3.0.xsd" version="3.0" name="com.visitor.task.ScheduledTasksTest" time="0.048" tests="5" errors="0" skipped="0" failures="0">
   <properties>
     <property name="java.specification.version" value="17"/>
     <property name="sun.cpu.isalist" value="amd64"/>
@@ -58,22 +58,15 @@
     <property name="sun.io.unicode.encoding" value="UnicodeLittle"/>
     <property name="java.class.version" value="61.0"/>
   </properties>
-  <testcase name="testCheckin_BlacklistedVisitor_LockReleasedWithoutConsuming" classname="com.visitor.service.GateServiceTest" time="0.171"/>
-  <testcase name="testCheckin_AppointmentNotApproved" classname="com.visitor.service.GateServiceTest" time="0.005"/>
-  <testcase name="testCheckout_NotCheckedIn" classname="com.visitor.service.GateServiceTest" time="0.004"/>
-  <testcase name="testCheckout_Success" classname="com.visitor.service.GateServiceTest" time="0.004">
-    <system-out><![CDATA[19:10:51.690 [main] INFO com.visitor.service.GateService -- Visitor 10 checked out for appointment APT001
+  <testcase name="testExpireOverdueItems_WithLock" classname="com.visitor.task.ScheduledTasksTest" time="0.021">
+    <system-out><![CDATA[19:10:52.891 [main] INFO com.visitor.task.ScheduledTasks -- Scheduled expiry: 2 appointments, 1 pass codes expired
 ]]></system-out>
   </testcase>
-  <testcase name="testCheckin_DuplicateEntry_UndepartedVisitor" classname="com.visitor.service.GateServiceTest" time="0.004"/>
-  <testcase name="testCheckout_AlreadyDeparted" classname="com.visitor.service.GateServiceTest" time="0.007"/>
-  <testcase name="testCheckin_EarlyScan_CodeNotConsumed" classname="com.visitor.service.GateServiceTest" time="0.004"/>
-  <testcase name="testCheckin_Success" classname="com.visitor.service.GateServiceTest" time="0.005">
-    <system-out><![CDATA[19:10:51.710 [main] INFO com.visitor.service.GateService -- Visitor Li Si checked in for appointment APT001
-]]></system-out>
-  </testcase>
-  <testcase name="testCheckin_IdempotentLog_AlreadyCheckedIn" classname="com.visitor.service.GateServiceTest" time="0.004">
-    <system-out><![CDATA[19:10:51.717 [main] WARN com.visitor.service.GateService -- Duplicate checkin attempt detected for passCode=1, appointment=1
+  <testcase name="testDetectUndeparted_LockFailed_Skipped" classname="com.visitor.task.ScheduledTasksTest" time="0.004"/>
+  <testcase name="testDetectUndeparted_AlreadyWarned_Skipped" classname="com.visitor.task.ScheduledTasksTest" time="0.01"/>
+  <testcase name="testExpireOverdueItems_LockFailed_Skipped" classname="com.visitor.task.ScheduledTasksTest" time="0.002"/>
+  <testcase name="testDetectUndeparted_FirstWarning" classname="com.visitor.task.ScheduledTasksTest" time="0.007">
+    <system-out><![CDATA[19:10:52.916 [main] WARN com.visitor.task.ScheduledTasks -- Undeparted visitor: Li Si (appointment APT001), overdue 30 minutes
 ]]></system-out>
   </testcase>
 </testsuite>

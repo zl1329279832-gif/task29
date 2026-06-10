@@ -5,6 +5,8 @@ import com.visitor.websocket.VisitorWebSocketHandler;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.LocalDateTime;
 import java.util.HashMap;
@@ -110,5 +112,32 @@ public class WebSocketPushService {
 
         webSocketHandler.pushToRole(RoleEnum.SECURITY.name(), message);
         log.info("Pushed undeparted warning: visitor={}, overdue={}min", visitorName, overdueMinutes);
+    }
+
+    /**
+     * Schedule a push to execute after the current transaction commits.
+     * Ensures WebSocket messages reflect the final committed DB state.
+     * If no transaction is active, executes immediately.
+     */
+    public void pushAfterCommit(Runnable pushAction) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    try {
+                        pushAction.run();
+                    } catch (Exception e) {
+                        log.error("Post-commit WebSocket push failed", e);
+                    }
+                }
+            });
+        } else {
+            // No active transaction — push immediately
+            try {
+                pushAction.run();
+            } catch (Exception e) {
+                log.error("WebSocket push failed (no transaction context)", e);
+            }
+        }
     }
 }

@@ -37,78 +37,117 @@ public class GateService {
     private final WebSocketPushService webSocketPushService;
 
     /**
-     * Visitor check-in by scanning QR pass code
+     * Visitor check-in by scanning QR pass code.
+     *
+     * Correct order: verify code (no consume) → validate appointment → blacklist recheck
+     * → duplicate entry check → idempotent log check → consume code → update state → log → push.
+     *
+     * If any business check fails after verify(), the scan lock is released without consuming
+     * the code, so the visitor can retry later.
      */
     @Transactional
     public AccessLog checkin(GateCheckinRequest request) {
-        // 1. Verify and use the pass code (with distributed lock)
-        PassCode passCode = passCodeService.verifyAndUse(request.getPassCode(), "ENTRY");
+        // 1. Verify pass code signature + status + validity (does NOT consume)
+        PassCode passCode = passCodeService.verify(request.getPassCode());
 
-        // 2. Get appointment and validate
-        Appointment appointment = appointmentService.getById(passCode.getAppointmentId());
-        if (appointment == null) {
-            throw new BizException(ErrorCode.APPOINTMENT_NOT_FOUND);
-        }
+        try {
+            // 2. Get appointment and validate status
+            Appointment appointment = appointmentService.getById(passCode.getAppointmentId());
+            if (appointment == null) {
+                throw new BizException(ErrorCode.APPOINTMENT_NOT_FOUND);
+            }
 
-        if (appointment.getStatus() != AppointmentStatusEnum.APPROVED) {
-            throw new BizException(ErrorCode.APPOINTMENT_STATUS_INVALID, "appointment not in APPROVED state");
-        }
+            if (appointment.getStatus() != AppointmentStatusEnum.APPROVED) {
+                throw new BizException(ErrorCode.APPOINTMENT_STATUS_INVALID, "appointment not in APPROVED state");
+            }
 
-        // 3. Check blacklist again at gate
-        Visitor visitor = visitorService.getById(appointment.getVisitorId());
-        Blacklist bl = blacklistService.check(visitor.getName(), visitor.getIdCard(), visitor.getPhone());
-        if (bl != null) {
-            // Create anomaly record and alert security
-            createAnomaly(appointment.getVisitorId(), appointment.getId(),
-                    AnomalyTypeEnum.BLACKLIST_ATTEMPT,
-                    "Blacklisted visitor attempted entry: " + bl.getReason(), null);
-            webSocketPushService.pushBlacklistAlert(visitor.getName(), bl.getReason(),
-                    request.getGateLocation());
+            // 3. Blacklist recheck at gate
+            Visitor visitor = visitorService.getById(appointment.getVisitorId());
+            Blacklist bl = blacklistService.check(visitor.getName(), visitor.getIdCard(), visitor.getPhone());
+            if (bl != null) {
+                createAnomaly(appointment.getVisitorId(), appointment.getId(),
+                        AnomalyTypeEnum.BLACKLIST_ATTEMPT,
+                        "Blacklisted visitor attempted entry: " + bl.getReason(), null);
 
-            // Log denied access
-            AccessLog deniedLog = AccessLog.builder()
+                AccessLog deniedLog = AccessLog.builder()
+                        .passCodeId(passCode.getId())
+                        .visitorId(visitor.getId())
+                        .appointmentId(appointment.getId())
+                        .action(AccessActionEnum.ENTRY)
+                        .gateLocation(request.getGateLocation())
+                        .result(AccessResultEnum.DENIED)
+                        .denyReason("BLACKLISTED")
+                        .build();
+                accessLogMapper.insert(deniedLog);
+
+                // Push blacklist alert after commit
+                webSocketPushService.pushAfterCommit(() ->
+                        webSocketPushService.pushBlacklistAlert(
+                                visitor.getName(), bl.getReason(), request.getGateLocation()));
+
+                throw new BizException(ErrorCode.BLACKLIST_HIT, bl.getReason());
+            }
+
+            // 4. Check for undeparted entry — prevent duplicate entry without exit
+            int undepartedCount = accessLogMapper.countUndepartedEntry(appointment.getId());
+            if (undepartedCount > 0) {
+                createAnomaly(appointment.getVisitorId(), appointment.getId(),
+                        AnomalyTypeEnum.DUPLICATE_ENTRY,
+                        "Visitor attempted re-entry without departure", null);
+                throw new BizException(ErrorCode.DUPLICATE_ENTRY);
+            }
+
+            // 5. Idempotent check — skip if this exact log already exists
+            int existingLogs = accessLogMapper.countExistingPassLog(
+                    passCode.getId(), appointment.getId(), AccessActionEnum.ENTRY.name());
+            if (existingLogs > 0) {
+                log.warn("Duplicate checkin attempt detected for passCode={}, appointment={}",
+                        passCode.getId(), appointment.getId());
+                throw new BizException(ErrorCode.ALREADY_CHECKED_IN);
+            }
+
+            // 6. All checks passed — now consume the pass code
+            passCodeService.markUsed(passCode);
+
+            // 7. Mark appointment as checked in
+            appointmentService.markCheckedIn(appointment.getId());
+
+            // 8. Increment visitor count
+            visitorService.incrementVisitCount(visitor.getId());
+
+            // 9. Create access log
+            String username = SecurityContextHolder.getContext().getAuthentication().getName();
+            SysUser operator = sysUserMapper.findByUsername(username);
+
+            AccessLog accessLog = AccessLog.builder()
                     .passCodeId(passCode.getId())
                     .visitorId(visitor.getId())
                     .appointmentId(appointment.getId())
                     .action(AccessActionEnum.ENTRY)
                     .gateLocation(request.getGateLocation())
-                    .result(AccessResultEnum.DENIED)
-                    .denyReason("BLACKLISTED")
+                    .result(AccessResultEnum.PASS)
+                    .operatorId(operator != null ? operator.getId() : null)
                     .build();
-            accessLogMapper.insert(deniedLog);
-            throw new BizException(ErrorCode.BLACKLIST_HIT, bl.getReason());
+            accessLogMapper.insert(accessLog);
+
+            // 10. Push arrival notification after transaction commits
+            SysUser host = sysUserMapper.selectById(appointment.getHostId());
+            if (host != null) {
+                String hostId = host.getId().toString();
+                String vName = visitor.getName();
+                String aptNo = appointment.getAppointNo();
+                webSocketPushService.pushAfterCommit(() ->
+                        webSocketPushService.pushVisitorArrived(hostId, vName, aptNo));
+            }
+
+            log.info("Visitor {} checked in for appointment {}", visitor.getName(), appointment.getAppointNo());
+            return accessLog;
+
+        } catch (Exception e) {
+            // Release scan lock without consuming on any failure
+            passCodeService.releaseScanLock(passCode);
+            throw e;
         }
-
-        // 4. Mark appointment as checked in
-        appointmentService.markCheckedIn(appointment.getId());
-
-        // 5. Increment visitor count
-        visitorService.incrementVisitCount(visitor.getId());
-
-        // 6. Create access log
-        String username = SecurityContextHolder.getContext().getAuthentication().getName();
-        SysUser operator = sysUserMapper.findByUsername(username);
-
-        AccessLog accessLog = AccessLog.builder()
-                .passCodeId(passCode.getId())
-                .visitorId(visitor.getId())
-                .appointmentId(appointment.getId())
-                .action(AccessActionEnum.ENTRY)
-                .gateLocation(request.getGateLocation())
-                .result(AccessResultEnum.PASS)
-                .operatorId(operator != null ? operator.getId() : null)
-                .build();
-        accessLogMapper.insert(accessLog);
-
-        // 7. Push arrival notification to host
-        SysUser host = sysUserMapper.selectById(appointment.getHostId());
-        if (host != null) {
-            webSocketPushService.pushVisitorArrived(
-                    host.getId().toString(), visitor.getName(), appointment.getAppointNo());
-        }
-
-        log.info("Visitor {} checked in for appointment {}", visitor.getName(), appointment.getAppointNo());
-        return accessLog;
     }
 
     /**
@@ -181,10 +220,13 @@ public class GateService {
                 .build();
         accessLogMapper.insert(accessLog);
 
-        // Push anomaly alert
+        // Push anomaly alert after commit
         Visitor visitor = visitorService.getById(request.getVisitorId());
-        webSocketPushService.pushAnomalyAlert(
-                request.getAnomalyType().name(), visitor.getName(), request.getDescription());
+        String aType = request.getAnomalyType().name();
+        String vName = visitor.getName();
+        String desc = request.getDescription();
+        webSocketPushService.pushAfterCommit(() ->
+                webSocketPushService.pushAnomalyAlert(aType, vName, desc));
 
         log.info("Anomaly release for visitor {} by security {}", request.getVisitorId(), username);
         return accessLog;

@@ -23,4 +23,12 @@ public class PassCode {
     private PassCodeStatusEnum status;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
+
+    /** Transient: carries distributed lock key from verify() to markUsed()/releaseScanLock() */
+    @TableField(exist = false)
+    private String lockKey;
+
+    /** Transient: carries distributed lock value from verify() to markUsed()/releaseScanLock() */
+    @TableField(exist = false)
+    private String lockValue;
 }
