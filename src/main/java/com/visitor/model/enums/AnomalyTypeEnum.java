@@ -1,0 +1,5 @@
+package com.visitor.model.enums;
+
+public enum AnomalyTypeEnum {
+    OVERSTAY, NO_DEPARTURE, EXPIRED_PASS, DUPLICATE_ENTRY, BLACKLIST_ATTEMPT, UNAUTHORIZED_AREA
+}

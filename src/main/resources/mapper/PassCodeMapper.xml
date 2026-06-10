@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.visitor.mapper.PassCodeMapper">
+
+    <select id="findByCode" resultType="com.visitor.model.entity.PassCode">
+        SELECT * FROM pass_code WHERE code = #{code}
+    </select>
+
+    <update id="expirePassCodes">
+        UPDATE pass_code SET status = 'EXPIRED'
+        WHERE status = 'ACTIVE' AND valid_to &lt; #{now}
+    </update>
+
+</mapper>

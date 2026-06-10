@@ -1,0 +1,6 @@
+com\visitor\service\GateServiceTest.class
+com\visitor\service\PassCodeServiceTest.class
+com\visitor\util\QrCodeUtilTest.class
+com\visitor\service\ImportServiceTest.class
+com\visitor\service\AppointmentServiceTest.class
+com\visitor\service\BlacklistServiceTest.class
