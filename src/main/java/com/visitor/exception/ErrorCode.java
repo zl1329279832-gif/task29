@@ -37,6 +37,10 @@ public enum ErrorCode {
     RESCHEDULE_NOT_ALLOWED(400016, "当前状态不允许改期"),
     VISITOR_BLACKLISTED(400017, "访客已被列入黑名单"),
     IMPORT_DATA_EMPTY(400018, "导入数据为空"),
+    PASS_CODE_NOT_YET_VALID(400019, "通行码尚未生效"),
+    NO_REENTRY_WITHOUT_EXIT(400020, "访客尚未离场，不允许重复入场"),
+    BATCH_DUPLICATE_VISITOR(400021, "批次内访客重复"),
+    APPROVAL_ALREADY_PROCESSED(400022, "审批已处理，请勿重复操作"),
 
     // System errors 500xxx
     SYSTEM_ERROR(500001, "系统内部错误"),

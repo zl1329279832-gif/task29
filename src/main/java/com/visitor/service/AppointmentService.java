@@ -1,6 +1,5 @@
 package com.visitor.service;
 
-import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.visitor.exception.BizException;
 import com.visitor.exception.ErrorCode;
@@ -14,12 +13,14 @@ import com.visitor.model.entity.Visitor;
 import com.visitor.model.enums.AppointmentStatusEnum;
 import com.visitor.model.enums.RoleEnum;
 import com.visitor.model.vo.AppointmentVO;
+import com.visitor.util.RedisLock;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
@@ -36,6 +37,9 @@ public class AppointmentService {
     private final BlacklistService blacklistService;
     private final PassCodeService passCodeService;
     private final WebSocketPushService webSocketPushService;
+    private final RedisLock redisLock;
+
+    private static final String APPOINTMENT_LOCK_PREFIX = "appointment:state:";
 
     @Transactional
     public Appointment create(AppointmentCreateRequest request) {
@@ -132,6 +136,10 @@ public class AppointmentService {
             throw new BizException(ErrorCode.APPOINTMENT_EXPIRED);
         }
 
+        // Re-check blacklist at approval time
+        Visitor visitor = visitorService.getById(appointment.getVisitorId());
+        blacklistService.assertNotBlacklisted(visitor.getName(), visitor.getIdCard(), visitor.getPhone());
+
         appointment.setStatus(AppointmentStatusEnum.APPROVED);
         appointment.setApprovedBy(approverId);
         appointment.setApprovedAt(LocalDateTime.now());
@@ -200,73 +208,124 @@ public class AppointmentService {
         log.info("Cancelled appointment {}", appointmentId);
     }
 
+    /**
+     * Reschedule an appointment:
+     * 1. Validates the old appointment can be rescheduled
+     * 2. Re-checks blacklist for the visitor
+     * 3. Cancels the old appointment and revokes its pass code (old code → invalid)
+     * 4. Creates a new PENDING appointment (requires re-approval → new code generated on approval)
+     */
     @Transactional
     public Appointment reschedule(Long appointmentId, AppointmentRescheduleRequest request) {
         String username = SecurityContextHolder.getContext().getAuthentication().getName();
         SysUser user = sysUserMapper.findByUsername(username);
 
-        Appointment oldAppointment = appointmentMapper.selectById(appointmentId);
-        if (oldAppointment == null) {
-            throw new BizException(ErrorCode.APPOINTMENT_NOT_FOUND);
+        // Lock the old appointment to prevent concurrent scans during reschedule
+        String lockKey = APPOINTMENT_LOCK_PREFIX + appointmentId;
+        String lockValue = redisLock.tryLock(lockKey, Duration.ofSeconds(15));
+        if (lockValue == null) {
+            throw new BizException(ErrorCode.PASS_CODE_DUPLICATE_SCAN, "appointment is being modified");
         }
 
-        if (user.getRole() == RoleEnum.EMPLOYEE && !oldAppointment.getHostId().equals(user.getId())) {
-            throw new BizException(ErrorCode.DATA_ACCESS_DENIED);
+        try {
+            Appointment oldAppointment = appointmentMapper.selectById(appointmentId);
+            if (oldAppointment == null) {
+                throw new BizException(ErrorCode.APPOINTMENT_NOT_FOUND);
+            }
+
+            if (user.getRole() == RoleEnum.EMPLOYEE && !oldAppointment.getHostId().equals(user.getId())) {
+                throw new BizException(ErrorCode.DATA_ACCESS_DENIED);
+            }
+
+            if (oldAppointment.getStatus() != AppointmentStatusEnum.PENDING
+                    && oldAppointment.getStatus() != AppointmentStatusEnum.APPROVED) {
+                throw new BizException(ErrorCode.RESCHEDULE_NOT_ALLOWED);
+            }
+
+            // Re-check blacklist for the visitor at reschedule time
+            Visitor visitor = visitorService.getById(oldAppointment.getVisitorId());
+            blacklistService.assertNotBlacklisted(visitor.getName(), visitor.getIdCard(), visitor.getPhone());
+
+            // Cancel old appointment and revoke its pass code (old code becomes invalid)
+            oldAppointment.setStatus(AppointmentStatusEnum.CANCELLED);
+            appointmentMapper.updateById(oldAppointment);
+            passCodeService.revokeByAppointmentId(appointmentId);
+
+            // Create new PENDING appointment (requires re-approval)
+            Appointment newAppointment = Appointment.builder()
+                    .appointNo(generateAppointNo())
+                    .visitorId(oldAppointment.getVisitorId())
+                    .hostId(oldAppointment.getHostId())
+                    .visitType(oldAppointment.getVisitType())
+                    .purpose(oldAppointment.getPurpose())
+                    .expectedArrive(request.getExpectedArrive())
+                    .expectedLeave(request.getExpectedLeave())
+                    .status(AppointmentStatusEnum.PENDING)
+                    .rescheduleFrom(appointmentId)
+                    .build();
+
+            appointmentMapper.insert(newAppointment);
+
+            webSocketPushService.pushApprovalReminder(
+                    newAppointment.getAppointNo(), visitor.getName(), user.getRealName());
+
+            log.info("Rescheduled appointment {} -> {} (old code revoked, new code pending approval)",
+                    appointmentId, newAppointment.getAppointNo());
+            return newAppointment;
+        } finally {
+            redisLock.unlock(lockKey, lockValue);
         }
-
-        if (oldAppointment.getStatus() != AppointmentStatusEnum.PENDING
-                && oldAppointment.getStatus() != AppointmentStatusEnum.APPROVED) {
-            throw new BizException(ErrorCode.RESCHEDULE_NOT_ALLOWED);
-        }
-
-        oldAppointment.setStatus(AppointmentStatusEnum.CANCELLED);
-        appointmentMapper.updateById(oldAppointment);
-        passCodeService.revokeByAppointmentId(appointmentId);
-
-        Appointment newAppointment = Appointment.builder()
-                .appointNo(generateAppointNo())
-                .visitorId(oldAppointment.getVisitorId())
-                .hostId(oldAppointment.getHostId())
-                .visitType(oldAppointment.getVisitType())
-                .purpose(oldAppointment.getPurpose())
-                .expectedArrive(request.getExpectedArrive())
-                .expectedLeave(request.getExpectedLeave())
-                .status(AppointmentStatusEnum.PENDING)
-                .rescheduleFrom(appointmentId)
-                .build();
-
-        appointmentMapper.insert(newAppointment);
-
-        Visitor visitor = visitorService.getById(oldAppointment.getVisitorId());
-        webSocketPushService.pushApprovalReminder(
-                newAppointment.getAppointNo(), visitor.getName(), user.getRealName());
-
-        log.info("Rescheduled appointment {} -> {}", appointmentId, newAppointment.getAppointNo());
-        return newAppointment;
     }
 
+    /**
+     * Transition appointment to CHECKED_IN.
+     * Idempotent: if already CHECKED_IN, this is a no-op (supports retry).
+     * If status is not APPROVED and not CHECKED_IN, throws.
+     */
     @Transactional
     public void markCheckedIn(Long appointmentId) {
         Appointment appointment = appointmentMapper.selectById(appointmentId);
         if (appointment == null) {
             throw new BizException(ErrorCode.APPOINTMENT_NOT_FOUND);
         }
-        if (appointment.getStatus() != AppointmentStatusEnum.APPROVED) {
-            throw new BizException(ErrorCode.APPOINTMENT_STATUS_INVALID);
+
+        // Idempotent: already checked in is OK (retry scenario)
+        if (appointment.getStatus() == AppointmentStatusEnum.CHECKED_IN) {
+            log.info("Appointment {} already CHECKED_IN (idempotent no-op)", appointmentId);
+            return;
         }
+
+        if (appointment.getStatus() != AppointmentStatusEnum.APPROVED) {
+            throw new BizException(ErrorCode.APPOINTMENT_STATUS_INVALID,
+                    "only APPROVED can be checked in, current: " + appointment.getStatus());
+        }
+
         appointment.setStatus(AppointmentStatusEnum.CHECKED_IN);
         appointmentMapper.updateById(appointment);
     }
 
+    /**
+     * Transition appointment to COMPLETED.
+     * Idempotent: if already COMPLETED, this is a no-op.
+     */
     @Transactional
     public void markCompleted(Long appointmentId) {
         Appointment appointment = appointmentMapper.selectById(appointmentId);
         if (appointment == null) {
             throw new BizException(ErrorCode.APPOINTMENT_NOT_FOUND);
         }
-        if (appointment.getStatus() != AppointmentStatusEnum.CHECKED_IN) {
-            throw new BizException(ErrorCode.APPOINTMENT_STATUS_INVALID);
+
+        // Idempotent: already completed is OK
+        if (appointment.getStatus() == AppointmentStatusEnum.COMPLETED) {
+            log.info("Appointment {} already COMPLETED (idempotent no-op)", appointmentId);
+            return;
         }
+
+        if (appointment.getStatus() != AppointmentStatusEnum.CHECKED_IN) {
+            throw new BizException(ErrorCode.APPOINTMENT_STATUS_INVALID,
+                    "only CHECKED_IN can be completed, current: " + appointment.getStatus());
+        }
+
         appointment.setStatus(AppointmentStatusEnum.COMPLETED);
         appointmentMapper.updateById(appointment);
     }
@@ -286,6 +345,19 @@ public class AppointmentService {
 
     public List<Appointment> getCheckedInOverdue() {
         return appointmentMapper.selectCheckedInOverdue(LocalDateTime.now());
+    }
+
+    /**
+     * Check if a visitor has any CHECKED_IN appointment (undeparted) other than the given one.
+     * Used by GateService to block re-entry without prior exit.
+     */
+    public boolean hasUndepartedAppointment(Long visitorId, Long excludeAppointmentId) {
+        long count = appointmentMapper.selectCount(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<Appointment>()
+                        .eq(Appointment::getVisitorId, visitorId)
+                        .eq(Appointment::getStatus, AppointmentStatusEnum.CHECKED_IN)
+                        .ne(Appointment::getId, excludeAppointmentId));
+        return count > 0;
     }
 
     private String generateAppointNo() {

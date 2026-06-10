@@ -12,6 +12,7 @@ import com.visitor.model.entity.Visitor;
 import com.visitor.model.enums.AppointmentStatusEnum;
 import com.visitor.model.enums.RoleEnum;
 import com.visitor.model.enums.VisitTypeEnum;
+import com.visitor.util.RedisLock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -22,6 +23,7 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
@@ -36,23 +38,13 @@ class AppointmentServiceTest {
     @InjectMocks
     private AppointmentService appointmentService;
 
-    @Mock
-    private AppointmentMapper appointmentMapper;
-
-    @Mock
-    private SysUserMapper sysUserMapper;
-
-    @Mock
-    private VisitorService visitorService;
-
-    @Mock
-    private BlacklistService blacklistService;
-
-    @Mock
-    private PassCodeService passCodeService;
-
-    @Mock
-    private WebSocketPushService webSocketPushService;
+    @Mock private AppointmentMapper appointmentMapper;
+    @Mock private SysUserMapper sysUserMapper;
+    @Mock private VisitorService visitorService;
+    @Mock private BlacklistService blacklistService;
+    @Mock private PassCodeService passCodeService;
+    @Mock private WebSocketPushService webSocketPushService;
+    @Mock private RedisLock redisLock;
 
     private SysUser hostUser;
     private Visitor testVisitor;
@@ -69,12 +61,13 @@ class AppointmentServiceTest {
                 .company("Test Corp").visitCount(0)
                 .build();
 
-        // Set security context
         var auth = new UsernamePasswordAuthenticationToken(
                 "employee1", null,
                 Collections.singletonList(new SimpleGrantedAuthority("ROLE_EMPLOYEE")));
         SecurityContextHolder.getContext().setAuthentication(auth);
     }
+
+    // ── Create tests ────────────────────────────────────────────────────
 
     @Test
     void testCreateAppointment_Success() {
@@ -134,6 +127,8 @@ class AppointmentServiceTest {
         assertEquals(ErrorCode.BLACKLIST_HIT, ex.getErrorCode());
     }
 
+    // ── Approve tests ───────────────────────────────────────────────────
+
     @Test
     void testApproveAppointment_Success() {
         Appointment appointment = Appointment.builder()
@@ -143,6 +138,7 @@ class AppointmentServiceTest {
                 .build();
 
         when(appointmentMapper.selectById(1L)).thenReturn(appointment);
+        when(visitorService.getById(10L)).thenReturn(testVisitor);
         when(sysUserMapper.selectById(1L)).thenReturn(hostUser);
 
         appointmentService.approve(1L, 100L, "Approved");
@@ -183,6 +179,29 @@ class AppointmentServiceTest {
     }
 
     @Test
+    void testApproveAppointment_BlacklistedAtApprovalTime() {
+        Appointment appointment = Appointment.builder()
+                .id(1L).status(AppointmentStatusEnum.PENDING)
+                .visitorId(10L).hostId(1L)
+                .expectedArrive(LocalDateTime.now().plusHours(1))
+                .build();
+
+        when(appointmentMapper.selectById(1L)).thenReturn(appointment);
+        when(visitorService.getById(10L)).thenReturn(testVisitor);
+        doThrow(new BizException(ErrorCode.BLACKLIST_HIT, "Recently blacklisted"))
+                .when(blacklistService).assertNotBlacklisted(eq("Li Si"), any(), eq("13800138000"));
+
+        BizException ex = assertThrows(BizException.class,
+                () -> appointmentService.approve(1L, 100L, "ok"));
+        assertEquals(ErrorCode.BLACKLIST_HIT, ex.getErrorCode());
+        // Appointment should NOT have been approved
+        assertEquals(AppointmentStatusEnum.PENDING, appointment.getStatus());
+        verify(passCodeService, never()).generateForAppointment(any());
+    }
+
+    // ── Reject tests ────────────────────────────────────────────────────
+
+    @Test
     void testRejectAppointment() {
         Appointment appointment = Appointment.builder()
                 .id(1L).appointNo("APT001").hostId(1L)
@@ -198,6 +217,8 @@ class AppointmentServiceTest {
         assertEquals("Not approved", appointment.getRejectReason());
         verify(webSocketPushService).pushApprovalResult(eq("1"), eq("APT001"), eq(false), eq("Not approved"));
     }
+
+    // ── Cancel tests ────────────────────────────────────────────────────
 
     @Test
     void testCancelAppointment() {
@@ -227,6 +248,8 @@ class AppointmentServiceTest {
         assertEquals(ErrorCode.DATA_ACCESS_DENIED, ex.getErrorCode());
     }
 
+    // ── Reschedule tests ────────────────────────────────────────────────
+
     @Test
     void testRescheduleAppointment() {
         Appointment oldAppointment = Appointment.builder()
@@ -243,6 +266,7 @@ class AppointmentServiceTest {
         when(sysUserMapper.findByUsername("employee1")).thenReturn(hostUser);
         when(appointmentMapper.selectById(1L)).thenReturn(oldAppointment);
         when(visitorService.getById(10L)).thenReturn(testVisitor);
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
 
         Appointment newAppointment = appointmentService.reschedule(1L, request);
 
@@ -251,7 +275,49 @@ class AppointmentServiceTest {
         assertEquals(AppointmentStatusEnum.PENDING, newAppointment.getStatus());
         assertEquals(1L, newAppointment.getRescheduleFrom());
         verify(passCodeService).revokeByAppointmentId(1L);
+        verify(redisLock).unlock(anyString(), eq("lock-value"));
     }
+
+    @Test
+    void testRescheduleAppointment_LockFailed() {
+        AppointmentRescheduleRequest request = new AppointmentRescheduleRequest();
+        request.setExpectedArrive(LocalDateTime.now().plusDays(3));
+
+        when(sysUserMapper.findByUsername("employee1")).thenReturn(hostUser);
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn(null);
+
+        BizException ex = assertThrows(BizException.class,
+                () -> appointmentService.reschedule(1L, request));
+        assertEquals(ErrorCode.PASS_CODE_DUPLICATE_SCAN, ex.getErrorCode());
+    }
+
+    @Test
+    void testRescheduleAppointment_BlacklistedVisitor() {
+        Appointment oldAppointment = Appointment.builder()
+                .id(1L).visitorId(10L).hostId(1L)
+                .status(AppointmentStatusEnum.APPROVED)
+                .expectedArrive(LocalDateTime.now().plusDays(1))
+                .build();
+
+        AppointmentRescheduleRequest request = new AppointmentRescheduleRequest();
+        request.setExpectedArrive(LocalDateTime.now().plusDays(3));
+
+        when(sysUserMapper.findByUsername("employee1")).thenReturn(hostUser);
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
+        when(appointmentMapper.selectById(1L)).thenReturn(oldAppointment);
+        when(visitorService.getById(10L)).thenReturn(testVisitor);
+        doThrow(new BizException(ErrorCode.BLACKLIST_HIT, "Blacklisted after creation"))
+                .when(blacklistService).assertNotBlacklisted(eq("Li Si"), any(), eq("13800138000"));
+
+        BizException ex = assertThrows(BizException.class,
+                () -> appointmentService.reschedule(1L, request));
+        assertEquals(ErrorCode.BLACKLIST_HIT, ex.getErrorCode());
+        // Old appointment should NOT have been cancelled
+        assertEquals(AppointmentStatusEnum.APPROVED, oldAppointment.getStatus());
+        verify(passCodeService, never()).revokeByAppointmentId(anyLong());
+    }
+
+    // ── MarkCheckedIn / MarkCompleted tests ─────────────────────────────
 
     @Test
     void testMarkCheckedIn() {
@@ -265,6 +331,18 @@ class AppointmentServiceTest {
     }
 
     @Test
+    void testMarkCheckedIn_Idempotent() {
+        Appointment appointment = Appointment.builder()
+                .id(1L).status(AppointmentStatusEnum.CHECKED_IN).build();
+        when(appointmentMapper.selectById(1L)).thenReturn(appointment);
+
+        // Should not throw — idempotent
+        appointmentService.markCheckedIn(1L);
+        assertEquals(AppointmentStatusEnum.CHECKED_IN, appointment.getStatus());
+        verify(appointmentMapper, never()).updateById(any());
+    }
+
+    @Test
     void testMarkCompleted() {
         Appointment appointment = Appointment.builder()
                 .id(1L).status(AppointmentStatusEnum.CHECKED_IN).build();
@@ -274,6 +352,36 @@ class AppointmentServiceTest {
 
         assertEquals(AppointmentStatusEnum.COMPLETED, appointment.getStatus());
     }
+
+    @Test
+    void testMarkCompleted_Idempotent() {
+        Appointment appointment = Appointment.builder()
+                .id(1L).status(AppointmentStatusEnum.COMPLETED).build();
+        when(appointmentMapper.selectById(1L)).thenReturn(appointment);
+
+        // Should not throw — idempotent
+        appointmentService.markCompleted(1L);
+        assertEquals(AppointmentStatusEnum.COMPLETED, appointment.getStatus());
+        verify(appointmentMapper, never()).updateById(any());
+    }
+
+    // ── Undeparted record check ─────────────────────────────────────────
+
+    @Test
+    void testHasUndepartedAppointment_True() {
+        when(appointmentMapper.selectCount(any())).thenReturn(1L);
+
+        assertTrue(appointmentService.hasUndepartedAppointment(10L, 5L));
+    }
+
+    @Test
+    void testHasUndepartedAppointment_False() {
+        when(appointmentMapper.selectCount(any())).thenReturn(0L);
+
+        assertFalse(appointmentService.hasUndepartedAppointment(10L, 5L));
+    }
+
+    // ── Expire overdue ──────────────────────────────────────────────────
 
     @Test
     void testExpireOverdueAppointments() {

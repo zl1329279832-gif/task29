@@ -40,10 +40,10 @@ public class PassCodeService {
     private static final String PASS_CODE_SCAN_LOCK_PREFIX = "visitor:scan:";
 
     /**
-     * Generate pass code for an approved appointment
+     * Generate pass code for an approved appointment.
+     * Idempotent: returns existing pass code if already generated.
      */
     public PassCode generateForAppointment(Appointment appointment) {
-        // Check if already exists
         PassCode existing = getPassCodeByAppointmentId(appointment.getId());
         if (existing != null) {
             return existing;
@@ -66,25 +66,28 @@ public class PassCodeService {
                 .build();
 
         passCodeMapper.insert(passCode);
-
-        // Cache in Redis
         cachePassCode(passCode);
 
         log.info("Generated pass code for appointment {}: {}", appointment.getId(), code);
         return passCode;
     }
 
+    // ── Phase 1: Read-only validation ───────────────────────────────────
+
     /**
-     * Verify and use a pass code (for gate check-in/check-out)
-     * Uses distributed lock to prevent concurrent scanning
+     * Verify a scanned pass code WITHOUT consuming a use.
+     * Acquires a short-lived scan lock to block truly concurrent duplicate scans,
+     * performs full read-only validation, then releases the lock.
+     *
+     * Caller MUST hold an appointment-level lock before calling confirmUsage().
      */
-    public PassCode verifyAndUse(String code, String scanPurpose) {
-        // 1. Verify HMAC signature
+    public PassCode verifyForScan(String code) {
+        // 1. HMAC signature check
         if (!QrCodeUtil.verifyPassCode(code, hmacKey)) {
             throw new BizException(ErrorCode.PASS_CODE_INVALID);
         }
 
-        // 2. Acquire distributed lock to prevent duplicate scanning
+        // 2. Short-lived scan lock (blocks the same code scanned at the same instant)
         String lockKey = PASS_CODE_SCAN_LOCK_PREFIX + code;
         String lockValue = redisLock.tryLock(lockKey);
         if (lockValue == null) {
@@ -92,47 +95,34 @@ public class PassCodeService {
         }
 
         try {
-            // 3. Get pass code (cache first, then DB)
-            PassCode passCode = getPassCodeByCode(code);
+            // 3. Always read fresh from DB to avoid stale cache
+            PassCode passCode = passCodeMapper.findByCode(code);
             if (passCode == null) {
                 throw new BizException(ErrorCode.PASS_CODE_INVALID);
             }
 
-            // 4. Check status
-            if (passCode.getStatus() == PassCodeStatusEnum.EXPIRED) {
-                throw new BizException(ErrorCode.PASS_CODE_EXPIRED);
-            }
-            if (passCode.getStatus() == PassCodeStatusEnum.REVOKED) {
-                throw new BizException(ErrorCode.PASS_CODE_REVOKED);
-            }
-            if (passCode.getStatus() == PassCodeStatusEnum.USED_UP) {
-                throw new BizException(ErrorCode.PASS_CODE_USED_UP);
-            }
+            // 4. Status guards
+            assertPassCodeUsable(passCode);
 
-            // 5. Check validity period
+            // 5. Validity window
             LocalDateTime now = LocalDateTime.now();
-            if (now.isBefore(passCode.getValidFrom()) || now.isAfter(passCode.getValidTo())) {
+            if (now.isBefore(passCode.getValidFrom())) {
+                throw new BizException(ErrorCode.PASS_CODE_NOT_YET_VALID);
+            }
+            if (now.isAfter(passCode.getValidTo())) {
                 passCode.setStatus(PassCodeStatusEnum.EXPIRED);
                 passCodeMapper.updateById(passCode);
                 evictCache(code);
                 throw new BizException(ErrorCode.PASS_CODE_EXPIRED);
             }
 
-            // 6. Check usage count
+            // 6. Remaining uses
             if (passCode.getUsedCount() >= passCode.getMaxUses()) {
                 passCode.setStatus(PassCodeStatusEnum.USED_UP);
                 passCodeMapper.updateById(passCode);
                 evictCache(code);
                 throw new BizException(ErrorCode.PASS_CODE_USED_UP);
             }
-
-            // 7. Increment usage count
-            passCode.setUsedCount(passCode.getUsedCount() + 1);
-            if (passCode.getUsedCount() >= passCode.getMaxUses()) {
-                passCode.setStatus(PassCodeStatusEnum.USED_UP);
-            }
-            passCodeMapper.updateById(passCode);
-            cachePassCode(passCode);
 
             return passCode;
         } finally {
@@ -140,8 +130,68 @@ public class PassCodeService {
         }
     }
 
+    // ── Phase 2: Commit usage ───────────────────────────────────────────
+
     /**
-     * Revoke pass code for an appointment (e.g., on cancellation/reschedule)
+     * Atomically consume one use of the pass code.
+     * MUST be called inside the caller's distributed lock (appointment-level)
+     * after ALL validations (blacklist, appointment state, undeparted check) have passed.
+     *
+     * Re-reads from DB to prevent TOCTOU races.
+     */
+    public PassCode confirmUsage(Long passCodeId) {
+        PassCode passCode = passCodeMapper.selectById(passCodeId);
+        if (passCode == null) {
+            throw new BizException(ErrorCode.PASS_CODE_INVALID);
+        }
+
+        // Re-validate state from fresh DB read
+        assertPassCodeUsable(passCode);
+
+        LocalDateTime now = LocalDateTime.now();
+        if (now.isBefore(passCode.getValidFrom()) || now.isAfter(passCode.getValidTo())) {
+            passCode.setStatus(PassCodeStatusEnum.EXPIRED);
+            passCodeMapper.updateById(passCode);
+            evictCache(passCode.getCode());
+            throw new BizException(ErrorCode.PASS_CODE_EXPIRED);
+        }
+
+        if (passCode.getUsedCount() >= passCode.getMaxUses()) {
+            passCode.setStatus(PassCodeStatusEnum.USED_UP);
+            passCodeMapper.updateById(passCode);
+            evictCache(passCode.getCode());
+            throw new BizException(ErrorCode.PASS_CODE_USED_UP);
+        }
+
+        // Increment usage
+        passCode.setUsedCount(passCode.getUsedCount() + 1);
+        if (passCode.getUsedCount() >= passCode.getMaxUses()) {
+            passCode.setStatus(PassCodeStatusEnum.USED_UP);
+        }
+        passCodeMapper.updateById(passCode);
+        cachePassCode(passCode);
+
+        log.info("Confirmed pass code usage: id={}, code={}, usedCount={}/{}",
+                passCodeId, passCode.getCode(), passCode.getUsedCount(), passCode.getMaxUses());
+        return passCode;
+    }
+
+    // ── Legacy single-phase method (kept for backwards compat in tests) ──
+
+    /**
+     * @deprecated Prefer verifyForScan + confirmUsage for gate flows.
+     */
+    @Deprecated
+    public PassCode verifyAndUse(String code, String scanPurpose) {
+        PassCode passCode = verifyForScan(code);
+        return confirmUsage(passCode.getId());
+    }
+
+    // ── Revoke / expire ─────────────────────────────────────────────────
+
+    /**
+     * Revoke pass code for an appointment (cancellation / reschedule).
+     * Idempotent: no-op if already revoked or non-existent.
      */
     public void revokeByAppointmentId(Long appointmentId) {
         PassCode passCode = getPassCodeByAppointmentId(appointmentId);
@@ -152,6 +202,12 @@ public class PassCodeService {
             log.info("Revoked pass code for appointment {}", appointmentId);
         }
     }
+
+    public int expirePassCodes() {
+        return passCodeMapper.expirePassCodes(LocalDateTime.now());
+    }
+
+    // ── Query helpers ───────────────────────────────────────────────────
 
     public PassCodeVO getPassCodeVO(Long appointmentId) {
         PassCode passCode = getPassCodeByAppointmentId(appointmentId);
@@ -176,19 +232,23 @@ public class PassCodeService {
                         .eq(PassCode::getAppointmentId, appointmentId));
     }
 
-    private PassCode getPassCodeByCode(String code) {
-        // Try Redis cache first
-        String cacheKey = PASS_CODE_CACHE_PREFIX + code;
-        Object cached = redisTemplate.opsForValue().get(cacheKey);
-        if (cached instanceof PassCode) {
-            return (PassCode) cached;
+    public PassCode getPassCodeById(Long id) {
+        return passCodeMapper.selectById(id);
+    }
+
+    // ── Internal helpers ────────────────────────────────────────────────
+
+    private void assertPassCodeUsable(PassCode passCode) {
+        switch (passCode.getStatus()) {
+            case EXPIRED:
+                throw new BizException(ErrorCode.PASS_CODE_EXPIRED);
+            case REVOKED:
+                throw new BizException(ErrorCode.PASS_CODE_REVOKED);
+            case USED_UP:
+                throw new BizException(ErrorCode.PASS_CODE_USED_UP);
+            default:
+                break;
         }
-        // Fallback to DB
-        PassCode passCode = passCodeMapper.findByCode(code);
-        if (passCode != null) {
-            cachePassCode(passCode);
-        }
-        return passCode;
     }
 
     private void cachePassCode(PassCode passCode) {
@@ -198,9 +258,5 @@ public class PassCodeService {
 
     private void evictCache(String code) {
         redisTemplate.delete(PASS_CODE_CACHE_PREFIX + code);
-    }
-
-    public int expirePassCodes() {
-        return passCodeMapper.expirePassCodes(LocalDateTime.now());
     }
 }

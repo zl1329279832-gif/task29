@@ -1,6 +1,14 @@
+com\visitor\service\CrossServiceScenarioTest$RescheduleReapprovalFlow.class
 com\visitor\service\GateServiceTest.class
+com\visitor\service\CrossServiceScenarioTest$BlacklistInterception.class
+com\visitor\service\CrossServiceScenarioTest$PushConsistency.class
 com\visitor\service\PassCodeServiceTest.class
+com\visitor\service\WebSocketPushServiceTest.class
 com\visitor\util\QrCodeUtilTest.class
+com\visitor\service\CrossServiceScenarioTest.class
 com\visitor\service\ImportServiceTest.class
 com\visitor\service\AppointmentServiceTest.class
+com\visitor\service\CrossServiceScenarioTest$StateMachineGuards.class
+com\visitor\service\ApprovalServiceTest.class
+com\visitor\task\ScheduledTasksTest.class
 com\visitor\service\BlacklistServiceTest.class

@@ -13,6 +13,7 @@ import com.visitor.model.entity.SysUser;
 import com.visitor.model.entity.Visitor;
 import com.visitor.model.enums.ImportStatusEnum;
 import com.visitor.model.enums.RoleEnum;
+import com.visitor.util.RedisLock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -24,6 +25,7 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
@@ -44,6 +46,7 @@ class ImportServiceTest {
     @Mock private AppointmentService appointmentService;
     @Mock private BlacklistService blacklistService;
     @Mock private AppointmentMapper appointmentMapper;
+    @Mock private RedisLock redisLock;
     @Spy private ObjectMapper objectMapper = new ObjectMapper();
 
     private SysUser operator;
@@ -60,6 +63,8 @@ class ImportServiceTest {
         SecurityContextHolder.getContext().setAuthentication(auth);
     }
 
+    // ── Basic import tests ──────────────────────────────────────────────
+
     @Test
     void testImportAllSuccess() {
         MeetingVisitorImportRequest request = new MeetingVisitorImportRequest();
@@ -73,6 +78,7 @@ class ImportServiceTest {
 
         Visitor visitor = Visitor.builder().id(10L).name("Visitor One").build();
 
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
         when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
         when(sysUserMapper.selectById(1L)).thenReturn(operator);
         when(visitorService.registerOrFind(any())).thenReturn(visitor);
@@ -86,6 +92,7 @@ class ImportServiceTest {
         assertEquals(1, result.getSuccessCount());
         assertEquals(0, result.getFailCount());
         assertEquals(ImportStatusEnum.COMPLETED, result.getStatus());
+        verify(redisLock).unlock(anyString(), eq("lock-value"));
     }
 
     @Test
@@ -106,6 +113,7 @@ class ImportServiceTest {
 
         Visitor visitor = Visitor.builder().id(10L).name("Good Visitor").build();
 
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
         when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
         when(sysUserMapper.selectById(1L)).thenReturn(operator);
         when(visitorService.registerOrFind(any())).thenReturn(visitor);
@@ -133,6 +141,7 @@ class ImportServiceTest {
         badItem.setExpectedArrive(null); // Null arrival
         request.setVisitors(List.of(badItem));
 
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
         when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
         when(importBatchMapper.insert(any())).thenReturn(1);
 
@@ -159,6 +168,7 @@ class ImportServiceTest {
         com.visitor.model.entity.Blacklist bl = com.visitor.model.entity.Blacklist.builder()
                 .id(1L).reason("Security threat").build();
 
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
         when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
         when(visitorService.registerOrFind(any())).thenReturn(visitor);
         when(blacklistService.check(anyString(), any(), anyString())).thenReturn(bl);
@@ -183,5 +193,62 @@ class ImportServiceTest {
         BizException ex = assertThrows(BizException.class,
                 () -> importService.importMeetingVisitors(request));
         assertEquals(ErrorCode.IMPORT_DATA_EMPTY, ex.getErrorCode());
+    }
+
+    // ── Batch dedup tests ───────────────────────────────────────────────
+
+    @Test
+    void testImportBatch_DuplicatePhoneInBatch() {
+        MeetingVisitorImportRequest request = new MeetingVisitorImportRequest();
+        request.setHostId(1L);
+
+        MeetingVisitorImportItem item1 = new MeetingVisitorImportItem();
+        item1.setName("Visitor A");
+        item1.setPhone("13800000001");
+        item1.setExpectedArrive(LocalDateTime.now().plusDays(1));
+
+        MeetingVisitorImportItem item2 = new MeetingVisitorImportItem();
+        item2.setName("Visitor B");
+        item2.setPhone("13800000001"); // Same phone!
+        item2.setExpectedArrive(LocalDateTime.now().plusDays(1));
+
+        request.setVisitors(List.of(item1, item2));
+
+        Visitor visitorA = Visitor.builder().id(10L).name("Visitor A").build();
+
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
+        when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
+        when(sysUserMapper.selectById(1L)).thenReturn(operator);
+        when(visitorService.registerOrFind(any())).thenReturn(visitorA);
+        when(blacklistService.check(any(), any(), any())).thenReturn(null);
+        when(appointmentMapper.insert(any())).thenReturn(1);
+        when(importBatchMapper.insert(any())).thenReturn(1);
+
+        ImportBatch result = importService.importMeetingVisitors(request);
+
+        assertEquals(2, result.getTotalCount());
+        assertEquals(1, result.getSuccessCount());
+        assertEquals(1, result.getFailCount());
+        assertEquals(ImportStatusEnum.PARTIAL_FAIL, result.getStatus());
+        assertTrue(result.getFailDetail().contains("Duplicate phone"));
+    }
+
+    @Test
+    void testImportBatch_LockFailed() {
+        MeetingVisitorImportRequest request = new MeetingVisitorImportRequest();
+        request.setHostId(1L);
+
+        MeetingVisitorImportItem item = new MeetingVisitorImportItem();
+        item.setName("Visitor");
+        item.setPhone("13800000001");
+        item.setExpectedArrive(LocalDateTime.now().plusDays(1));
+        request.setVisitors(List.of(item));
+
+        when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn(null);
+
+        BizException ex = assertThrows(BizException.class,
+                () -> importService.importMeetingVisitors(request));
+        assertEquals(ErrorCode.PARAM_INVALID, ex.getErrorCode());
     }
 }

@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Slf4j
 @Component
@@ -24,6 +25,9 @@ public class VisitorWebSocketHandler extends TextWebSocketHandler {
     private static final Map<String, List<WebSocketSession>> USER_SESSIONS = new ConcurrentHashMap<>();
     // role -> list of sessions
     private static final Map<String, List<WebSocketSession>> ROLE_SESSIONS = new ConcurrentHashMap<>();
+
+    private static final AtomicInteger TOTAL_SENT = new AtomicInteger(0);
+    private static final AtomicInteger TOTAL_FAILED = new AtomicInteger(0);
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
@@ -44,21 +48,21 @@ public class VisitorWebSocketHandler extends TextWebSocketHandler {
         String userId = getParam(session, "userId");
         String role = getParam(session, "role");
 
-        if (userId != null) {
-            List<WebSocketSession> sessions = USER_SESSIONS.get(userId);
-            if (sessions != null) {
-                sessions.remove(session);
-                if (sessions.isEmpty()) USER_SESSIONS.remove(userId);
-            }
-        }
-        if (role != null) {
-            List<WebSocketSession> sessions = ROLE_SESSIONS.get(role);
-            if (sessions != null) {
-                sessions.remove(session);
-                if (sessions.isEmpty()) ROLE_SESSIONS.remove(role);
-            }
-        }
-        log.info("WebSocket disconnected: userId={}, role={}, sessionId={}", userId, role, session.getId());
+        removeSession(USER_SESSIONS, userId, session);
+        removeSession(ROLE_SESSIONS, role, session);
+
+        log.info("WebSocket disconnected: userId={}, role={}, sessionId={}, status={}",
+                userId, role, session.getId(), status);
+    }
+
+    @Override
+    public void handleTransportError(WebSocketSession session, Throwable exception) {
+        log.warn("WebSocket transport error on session {}: {}", session.getId(), exception.getMessage());
+        // Remove the faulty session
+        String userId = getParam(session, "userId");
+        String role = getParam(session, "role");
+        removeSession(USER_SESSIONS, userId, session);
+        removeSession(ROLE_SESSIONS, role, session);
     }
 
     @Override
@@ -66,41 +70,96 @@ public class VisitorWebSocketHandler extends TextWebSocketHandler {
         log.debug("Received WebSocket message: {}", message.getPayload());
     }
 
+    // ── Public push methods ─────────────────────────────────────────────
+
     /**
-     * Push message to a specific user
+     * Push message to a specific user (all their sessions).
+     * Closed/failed sessions are auto-removed.
      */
     public void pushToUser(String userId, Map<String, Object> message) {
         List<WebSocketSession> sessions = USER_SESSIONS.get(userId);
-        if (sessions != null) {
-            sessions.forEach(s -> sendMessage(s, message));
+        if (sessions == null || sessions.isEmpty()) {
+            log.debug("No active sessions for user {}, push skipped", userId);
+            return;
         }
+        sendToSessions(sessions, message, "user:" + userId);
     }
 
     /**
-     * Push message to all users with a specific role
+     * Push message to all users with a specific role.
+     * Closed/failed sessions are auto-removed.
      */
     public void pushToRole(String role, Map<String, Object> message) {
         List<WebSocketSession> sessions = ROLE_SESSIONS.get(role);
-        if (sessions != null) {
-            sessions.forEach(s -> sendMessage(s, message));
+        if (sessions == null || sessions.isEmpty()) {
+            log.debug("No active sessions for role {}, push skipped", role);
+            return;
         }
+        sendToSessions(sessions, message, "role:" + role);
     }
 
     /**
-     * Broadcast to all connected clients
+     * Broadcast to all connected clients.
      */
     public void broadcast(Map<String, Object> message) {
         USER_SESSIONS.values().forEach(sessions ->
-                sessions.forEach(s -> sendMessage(s, message)));
+                sendToSessions(sessions, message, "broadcast"));
     }
 
-    private void sendMessage(WebSocketSession session, Map<String, Object> message) {
-        if (session.isOpen()) {
+    // ── Diagnostics ─────────────────────────────────────────────────────
+
+    public int getTotalSent() {
+        return TOTAL_SENT.get();
+    }
+
+    public int getTotalFailed() {
+        return TOTAL_FAILED.get();
+    }
+
+    public int getActiveSessionCount() {
+        return USER_SESSIONS.values().stream().mapToInt(List::size).sum();
+    }
+
+    // ── Internal helpers ────────────────────────────────────────────────
+
+    private void sendToSessions(List<WebSocketSession> sessions, Map<String, Object> message, String target) {
+        List<WebSocketSession> toRemove = new java.util.ArrayList<>();
+
+        for (WebSocketSession session : sessions) {
+            if (!session.isOpen()) {
+                toRemove.add(session);
+                continue;
+            }
             try {
                 String json = objectMapper.writeValueAsString(message);
-                session.sendMessage(new TextMessage(json));
+                synchronized (session) {
+                    if (session.isOpen()) {
+                        session.sendMessage(new TextMessage(json));
+                        TOTAL_SENT.incrementAndGet();
+                    } else {
+                        toRemove.add(session);
+                    }
+                }
             } catch (IOException e) {
-                log.error("Failed to send WebSocket message to session {}: {}", session.getId(), e.getMessage());
+                TOTAL_FAILED.incrementAndGet();
+                log.warn("Failed to send WebSocket message to session {} (target={}): {}",
+                        session.getId(), target, e.getMessage());
+                toRemove.add(session);
+            }
+        }
+
+        // Clean up dead sessions
+        sessions.removeAll(toRemove);
+    }
+
+    private void removeSession(Map<String, List<WebSocketSession>> sessionMap,
+                                String key, WebSocketSession session) {
+        if (key == null) return;
+        List<WebSocketSession> sessions = sessionMap.get(key);
+        if (sessions != null) {
+            sessions.remove(session);
+            if (sessions.isEmpty()) {
+                sessionMap.remove(key);
             }
         }
     }

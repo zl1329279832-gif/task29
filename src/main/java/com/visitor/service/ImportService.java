@@ -17,17 +17,16 @@ import com.visitor.model.enums.AppointmentStatusEnum;
 import com.visitor.model.enums.ImportStatusEnum;
 import com.visitor.model.enums.VisitTypeEnum;
 import com.visitor.model.vo.ImportBatchVO;
+import com.visitor.util.RedisLock;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 @Slf4j
 @Service
@@ -40,11 +39,20 @@ public class ImportService {
     private final VisitorService visitorService;
     private final AppointmentService appointmentService;
     private final BlacklistService blacklistService;
+    private final RedisLock redisLock;
     private final ObjectMapper objectMapper;
 
+    private static final String IMPORT_LOCK_PREFIX = "import:batch:";
+
     /**
-     * Batch import meeting visitors
-     * Each row is processed independently - partial failure is allowed
+     * Batch import meeting visitors.
+     * Each row is processed independently — partial failure is allowed.
+     *
+     * Improvements:
+     * - Distributed lock prevents duplicate batch submission
+     * - Per-batch visitor dedup (same phone in same batch → skip duplicate)
+     * - Blacklist check per visitor with detailed failure recording
+     * - Each row failure is isolated and does not roll back successful rows
      */
     public ImportBatch importMeetingVisitors(MeetingVisitorImportRequest request) {
         String username = SecurityContextHolder.getContext().getAuthentication().getName();
@@ -55,94 +63,124 @@ public class ImportService {
             throw new BizException(ErrorCode.IMPORT_DATA_EMPTY);
         }
 
-        // Create batch record
-        ImportBatch batch = ImportBatch.builder()
-                .operatorId(operator.getId())
-                .totalCount(visitors.size())
-                .successCount(0)
-                .failCount(0)
-                .status(ImportStatusEnum.PROCESSING)
-                .build();
-        importBatchMapper.insert(batch);
-
-        List<Map<String, Object>> failDetails = new ArrayList<>();
-        int successCount = 0;
-        int failCount = 0;
-
-        // Process each visitor independently
-        for (int i = 0; i < visitors.size(); i++) {
-            MeetingVisitorImportItem item = visitors.get(i);
-            int rowNum = i + 1;
-            try {
-                // Validate required fields
-                if (!StringUtils.hasText(item.getName())) {
-                    throw new IllegalArgumentException("Name is required");
-                }
-                if (item.getExpectedArrive() == null) {
-                    throw new IllegalArgumentException("Expected arrival time is required");
-                }
-
-                // Register or find visitor
-                VisitorRegisterRequest visitorReq = new VisitorRegisterRequest();
-                visitorReq.setName(item.getName());
-                visitorReq.setIdCard(item.getIdCard());
-                visitorReq.setPhone(item.getPhone());
-                visitorReq.setCompany(item.getCompany());
-                Visitor visitor = visitorService.registerOrFind(visitorReq);
-
-                // Blacklist check - skip this visitor if blacklisted
-                Blacklist bl = blacklistService.check(visitor.getName(), visitor.getIdCard(), visitor.getPhone());
-                if (bl != null) {
-                    throw new IllegalArgumentException("Blacklisted: " + bl.getReason());
-                }
-
-                // Create appointment (set the host to the specified hostId)
-                AppointmentCreateRequest apptReq = new AppointmentCreateRequest();
-                apptReq.setVisitorId(visitor.getId());
-                apptReq.setVisitType(VisitTypeEnum.MEETING);
-                apptReq.setPurpose(item.getPurpose());
-                apptReq.setExpectedArrive(item.getExpectedArrive());
-                apptReq.setExpectedLeave(item.getExpectedLeave());
-
-                // We need to temporarily set the security context to the host
-                // For batch import, we create appointments under the specified host
-                createAppointmentForHost(request.getHostId(), apptReq, visitor);
-
-                successCount++;
-            } catch (Exception e) {
-                failCount++;
-                Map<String, Object> failDetail = new HashMap<>();
-                failDetail.put("row", rowNum);
-                failDetail.put("name", item.getName());
-                failDetail.put("reason", e.getMessage());
-                failDetails.add(failDetail);
-                log.warn("Import row {} failed: {}", rowNum, e.getMessage());
-            }
-        }
-
-        // Update batch record
-        batch.setSuccessCount(successCount);
-        batch.setFailCount(failCount);
-
-        if (failCount == 0) {
-            batch.setStatus(ImportStatusEnum.COMPLETED);
-        } else if (successCount == 0) {
-            batch.setStatus(ImportStatusEnum.FAILED);
-        } else {
-            batch.setStatus(ImportStatusEnum.PARTIAL_FAIL);
+        // Distributed lock to prevent concurrent duplicate batch submissions
+        String lockKey = IMPORT_LOCK_PREFIX + request.getHostId() + ":" + visitors.size();
+        String lockValue = redisLock.tryLock(lockKey, Duration.ofSeconds(60));
+        if (lockValue == null) {
+            throw new BizException(ErrorCode.PARAM_INVALID, "批次正在处理中，请勿重复提交");
         }
 
         try {
-            batch.setFailDetail(objectMapper.writeValueAsString(failDetails));
-        } catch (JsonProcessingException e) {
-            batch.setFailDetail("[]");
+            // Create batch record
+            ImportBatch batch = ImportBatch.builder()
+                    .operatorId(operator.getId())
+                    .totalCount(visitors.size())
+                    .successCount(0)
+                    .failCount(0)
+                    .status(ImportStatusEnum.PROCESSING)
+                    .build();
+            importBatchMapper.insert(batch);
+
+            List<Map<String, Object>> failDetails = new ArrayList<>();
+            int successCount = 0;
+            int failCount = 0;
+
+            // Track visitors within this batch for dedup (by phone number)
+            Set<String> batchPhoneSet = new HashSet<>();
+            // Track visitors within this batch for dedup (by name + idCard combination)
+            Set<String> batchNameIdCardSet = new HashSet<>();
+
+            for (int i = 0; i < visitors.size(); i++) {
+                MeetingVisitorImportItem item = visitors.get(i);
+                int rowNum = i + 1;
+                try {
+                    // Validate required fields
+                    if (!StringUtils.hasText(item.getName())) {
+                        throw new IllegalArgumentException("Name is required");
+                    }
+                    if (item.getExpectedArrive() == null) {
+                        throw new IllegalArgumentException("Expected arrival time is required");
+                    }
+
+                    // Batch-level dedup: same phone in same batch
+                    String phoneKey = item.getPhone() != null ? item.getPhone().trim() : "";
+                    if (StringUtils.hasText(phoneKey) && !batchPhoneSet.add(phoneKey)) {
+                        throw new IllegalArgumentException(
+                                "Duplicate phone in batch: " + phoneKey);
+                    }
+
+                    // Batch-level dedup: same name + idCard in same batch
+                    String nameIdCardKey = item.getName().trim() + "|"
+                            + (item.getIdCard() != null ? item.getIdCard().trim() : "");
+                    if (!batchNameIdCardSet.add(nameIdCardKey)) {
+                        throw new IllegalArgumentException(
+                                "Duplicate name+idCard in batch: " + item.getName());
+                    }
+
+                    // Register or find visitor
+                    VisitorRegisterRequest visitorReq = new VisitorRegisterRequest();
+                    visitorReq.setName(item.getName());
+                    visitorReq.setIdCard(item.getIdCard());
+                    visitorReq.setPhone(item.getPhone());
+                    visitorReq.setCompany(item.getCompany());
+                    Visitor visitor = visitorService.registerOrFind(visitorReq);
+
+                    // Blacklist check — skip this visitor if blacklisted
+                    Blacklist bl = blacklistService.check(
+                            visitor.getName(), visitor.getIdCard(), visitor.getPhone());
+                    if (bl != null) {
+                        throw new IllegalArgumentException("Blacklisted: " + bl.getReason());
+                    }
+
+                    // Create appointment for the specified host
+                    AppointmentCreateRequest apptReq = new AppointmentCreateRequest();
+                    apptReq.setVisitorId(visitor.getId());
+                    apptReq.setVisitType(VisitTypeEnum.MEETING);
+                    apptReq.setPurpose(item.getPurpose());
+                    apptReq.setExpectedArrive(item.getExpectedArrive());
+                    apptReq.setExpectedLeave(item.getExpectedLeave());
+
+                    createAppointmentForHost(request.getHostId(), apptReq, visitor);
+
+                    successCount++;
+                } catch (Exception e) {
+                    failCount++;
+                    Map<String, Object> failDetail = new HashMap<>();
+                    failDetail.put("row", rowNum);
+                    failDetail.put("name", item.getName());
+                    failDetail.put("phone", item.getPhone());
+                    failDetail.put("reason", e.getMessage());
+                    failDetails.add(failDetail);
+                    log.warn("Import row {} failed: {}", rowNum, e.getMessage());
+                }
+            }
+
+            // Update batch record
+            batch.setSuccessCount(successCount);
+            batch.setFailCount(failCount);
+
+            if (failCount == 0) {
+                batch.setStatus(ImportStatusEnum.COMPLETED);
+            } else if (successCount == 0) {
+                batch.setStatus(ImportStatusEnum.FAILED);
+            } else {
+                batch.setStatus(ImportStatusEnum.PARTIAL_FAIL);
+            }
+
+            try {
+                batch.setFailDetail(objectMapper.writeValueAsString(failDetails));
+            } catch (JsonProcessingException e) {
+                batch.setFailDetail("[]");
+            }
+
+            importBatchMapper.updateById(batch);
+
+            log.info("Batch import completed: total={}, success={}, fail={}",
+                    visitors.size(), successCount, failCount);
+            return batch;
+        } finally {
+            redisLock.unlock(lockKey, lockValue);
         }
-
-        importBatchMapper.updateById(batch);
-
-        log.info("Batch import completed: total={}, success={}, fail={}",
-                visitors.size(), successCount, failCount);
-        return batch;
     }
 
     public ImportBatchVO getBatchStatus(Long batchId) {
@@ -163,7 +201,7 @@ public class ImportService {
     }
 
     /**
-     * Create appointment for a specific host (used in batch import)
+     * Create appointment for a specific host (used in batch import).
      */
     private void createAppointmentForHost(Long hostId, AppointmentCreateRequest request, Visitor visitor) {
         SysUser host = sysUserMapper.selectById(hostId);

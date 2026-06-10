@@ -17,98 +17,163 @@ public class WebSocketPushService {
 
     private final VisitorWebSocketHandler webSocketHandler;
 
+    private static final int MAX_PUSH_RETRIES = 2;
+
+    // ── Push methods with retry ─────────────────────────────────────────
+
     /**
-     * Push visitor arrival notification to host employee
+     * Push visitor arrival notification to host employee.
      */
     public void pushVisitorArrived(String hostUserId, String visitorName, String appointmentNo) {
-        Map<String, Object> message = new HashMap<>();
-        message.put("type", "VISITOR_ARRIVED");
-        message.put("visitorName", visitorName);
-        message.put("appointmentNo", appointmentNo);
-        message.put("timestamp", LocalDateTime.now().toString());
-        message.put("message", "访客 " + visitorName + " 已到达");
+        Map<String, Object> message = buildMessage("VISITOR_ARRIVED",
+                "visitorName", visitorName,
+                "appointmentNo", appointmentNo,
+                "message", "访客 " + visitorName + " 已到达");
 
-        webSocketHandler.pushToUser(hostUserId, message);
-        log.info("Pushed visitor arrival to host {}: visitor={}", hostUserId, visitorName);
+        pushToUserWithRetry(hostUserId, message, "visitorArrived");
     }
 
     /**
-     * Push anomaly alert to all security staff
+     * Push anomaly alert to all security staff.
      */
     public void pushAnomalyAlert(String anomalyType, String visitorName, String description) {
-        Map<String, Object> message = new HashMap<>();
-        message.put("type", "ANOMALY_ALERT");
-        message.put("anomalyType", anomalyType);
-        message.put("visitorName", visitorName);
-        message.put("description", description);
-        message.put("timestamp", LocalDateTime.now().toString());
-        message.put("message", "异常通行告警：" + description);
+        Map<String, Object> message = buildMessage("ANOMALY_ALERT",
+                "anomalyType", anomalyType,
+                "visitorName", visitorName,
+                "description", description,
+                "message", "异常通行告警：" + description);
 
-        webSocketHandler.pushToRole(RoleEnum.SECURITY.name(), message);
-        log.info("Pushed anomaly alert to security: type={}, visitor={}", anomalyType, visitorName);
+        pushToRoleWithRetry(RoleEnum.SECURITY.name(), message, "anomalyAlert");
     }
 
     /**
-     * Push blacklist interception alert to security
+     * Push blacklist interception alert to security.
      */
     public void pushBlacklistAlert(String visitorName, String reason, String location) {
-        Map<String, Object> message = new HashMap<>();
-        message.put("type", "BLACKLIST_ALERT");
-        message.put("visitorName", visitorName);
-        message.put("reason", reason);
-        message.put("location", location);
-        message.put("timestamp", LocalDateTime.now().toString());
-        message.put("message", "黑名单访客 " + visitorName + " 尝试通行，已拦截");
+        Map<String, Object> message = buildMessage("BLACKLIST_ALERT",
+                "visitorName", visitorName,
+                "reason", reason,
+                "location", location,
+                "message", "黑名单访客 " + visitorName + " 尝试通行，已拦截");
 
-        webSocketHandler.pushToRole(RoleEnum.SECURITY.name(), message);
-        log.info("Pushed blacklist alert to security: visitor={}", visitorName);
+        pushToRoleWithRetry(RoleEnum.SECURITY.name(), message, "blacklistAlert");
     }
 
     /**
-     * Push approval reminder to admins
+     * Push approval reminder to admins.
      */
     public void pushApprovalReminder(String appointmentNo, String visitorName, String hostName) {
-        Map<String, Object> message = new HashMap<>();
-        message.put("type", "APPROVAL_REMINDER");
-        message.put("appointmentNo", appointmentNo);
-        message.put("visitorName", visitorName);
-        message.put("hostName", hostName);
-        message.put("timestamp", LocalDateTime.now().toString());
-        message.put("message", "新预约待审批：" + visitorName + " 来访 " + hostName);
+        Map<String, Object> message = buildMessage("APPROVAL_REMINDER",
+                "appointmentNo", appointmentNo,
+                "visitorName", visitorName,
+                "hostName", hostName,
+                "message", "新预约待审批：" + visitorName + " 来访 " + hostName);
 
-        webSocketHandler.pushToRole(RoleEnum.ADMIN.name(), message);
-        log.info("Pushed approval reminder to admins: appointment={}", appointmentNo);
+        pushToRoleWithRetry(RoleEnum.ADMIN.name(), message, "approvalReminder");
     }
 
     /**
-     * Push approval result to the employee who created the appointment
+     * Push approval result to the employee who created the appointment.
      */
-    public void pushApprovalResult(String hostUserId, String appointmentNo, boolean approved, String reason) {
-        Map<String, Object> message = new HashMap<>();
-        message.put("type", "APPROVAL_RESULT");
-        message.put("appointmentNo", appointmentNo);
-        message.put("approved", approved);
-        message.put("reason", reason);
-        message.put("timestamp", LocalDateTime.now().toString());
-        message.put("message", approved ? "预约已通过审批" : "预约被拒绝：" + reason);
+    public void pushApprovalResult(String hostUserId, String appointmentNo,
+                                    boolean approved, String reason) {
+        Map<String, Object> message = buildMessage("APPROVAL_RESULT",
+                "appointmentNo", appointmentNo,
+                "approved", approved,
+                "reason", reason,
+                "message", approved ? "预约已通过审批" : "预约被拒绝：" + reason);
 
-        webSocketHandler.pushToUser(hostUserId, message);
-        log.info("Pushed approval result to host {}: appointment={}, approved={}", hostUserId, appointmentNo, approved);
+        pushToUserWithRetry(hostUserId, message, "approvalResult");
     }
 
     /**
-     * Push undeparted visitor warning to security
+     * Push undeparted visitor warning to security.
      */
     public void pushUndepartedWarning(String visitorName, String appointmentNo, long overdueMinutes) {
-        Map<String, Object> message = new HashMap<>();
-        message.put("type", "UNDEPARTED_WARNING");
-        message.put("visitorName", visitorName);
-        message.put("appointmentNo", appointmentNo);
-        message.put("overdueMinutes", overdueMinutes);
-        message.put("timestamp", LocalDateTime.now().toString());
-        message.put("message", "访客 " + visitorName + " 已超时 " + overdueMinutes + " 分钟未离场");
+        Map<String, Object> message = buildMessage("UNDEPARTED_WARNING",
+                "visitorName", visitorName,
+                "appointmentNo", appointmentNo,
+                "overdueMinutes", overdueMinutes,
+                "message", "访客 " + visitorName + " 已超时 " + overdueMinutes + " 分钟未离场");
 
-        webSocketHandler.pushToRole(RoleEnum.SECURITY.name(), message);
-        log.info("Pushed undeparted warning: visitor={}, overdue={}min", visitorName, overdueMinutes);
+        pushToRoleWithRetry(RoleEnum.SECURITY.name(), message, "undepartedWarning");
+    }
+
+    /**
+     * Push pass code revoked notification (used during reschedule).
+     */
+    public void pushPassCodeRevoked(String hostUserId, String appointmentNo, String reason) {
+        Map<String, Object> message = buildMessage("PASS_CODE_REVOKED",
+                "appointmentNo", appointmentNo,
+                "reason", reason,
+                "message", "通行码已撤销：" + reason);
+
+        pushToUserWithRetry(hostUserId, message, "passCodeRevoked");
+    }
+
+    /**
+     * Push gate status change notification (consistent state sync).
+     */
+    public void pushGateStatusChange(String targetUserId, String appointmentNo,
+                                      String gateAction, String newStatus) {
+        Map<String, Object> message = buildMessage("GATE_STATUS_CHANGE",
+                "appointmentNo", appointmentNo,
+                "gateAction", gateAction,
+                "newStatus", newStatus,
+                "message", "门禁状态变更：" + gateAction + " → " + newStatus);
+
+        pushToUserWithRetry(targetUserId, message, "gateStatusChange");
+    }
+
+    // ── Internal retry helpers ──────────────────────────────────────────
+
+    private void pushToUserWithRetry(String userId, Map<String, Object> message, String pushType) {
+        boolean success = false;
+        for (int attempt = 0; attempt <= MAX_PUSH_RETRIES; attempt++) {
+            try {
+                webSocketHandler.pushToUser(userId, message);
+                success = true;
+                break;
+            } catch (Exception e) {
+                log.warn("Push {} to user {} failed (attempt {}/{}): {}",
+                        pushType, userId, attempt + 1, MAX_PUSH_RETRIES + 1, e.getMessage());
+            }
+        }
+        if (success) {
+            log.info("Push {} to user {} succeeded", pushType, userId);
+        } else {
+            log.error("Push {} to user {} FAILED after {} attempts — DB state and client may be inconsistent",
+                    pushType, userId, MAX_PUSH_RETRIES + 1);
+        }
+    }
+
+    private void pushToRoleWithRetry(String role, Map<String, Object> message, String pushType) {
+        boolean success = false;
+        for (int attempt = 0; attempt <= MAX_PUSH_RETRIES; attempt++) {
+            try {
+                webSocketHandler.pushToRole(role, message);
+                success = true;
+                break;
+            } catch (Exception e) {
+                log.warn("Push {} to role {} failed (attempt {}/{}): {}",
+                        pushType, role, attempt + 1, MAX_PUSH_RETRIES + 1, e.getMessage());
+            }
+        }
+        if (success) {
+            log.info("Push {} to role {} succeeded", pushType, role);
+        } else {
+            log.error("Push {} to role {} FAILED after {} attempts",
+                    pushType, role, MAX_PUSH_RETRIES + 1);
+        }
+    }
+
+    private Map<String, Object> buildMessage(String type, Object... kvPairs) {
+        Map<String, Object> message = new HashMap<>();
+        message.put("type", type);
+        message.put("timestamp", LocalDateTime.now().toString());
+        for (int i = 0; i + 1 < kvPairs.length; i += 2) {
+            message.put(String.valueOf(kvPairs[i]), kvPairs[i + 1]);
+        }
+        return message;
     }
 }

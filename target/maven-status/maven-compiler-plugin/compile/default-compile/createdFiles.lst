@@ -91,3 +91,4 @@ com\visitor\model\entity\PassCode.class
 com\visitor\controller\BlacklistController.class
 com\visitor\model\enums\RoleEnum.class
 com\visitor\model\entity\SysUser$SysUserBuilder.class
+com\visitor\service\PassCodeService$1.class

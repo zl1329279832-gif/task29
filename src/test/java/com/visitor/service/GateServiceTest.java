@@ -1,5 +1,6 @@
 package com.visitor.service;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.visitor.exception.BizException;
 import com.visitor.exception.ErrorCode;
 import com.visitor.mapper.AccessLogMapper;
@@ -9,6 +10,7 @@ import com.visitor.model.dto.GateCheckinRequest;
 import com.visitor.model.dto.GateCheckoutRequest;
 import com.visitor.model.entity.*;
 import com.visitor.model.enums.*;
+import com.visitor.util.RedisLock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -19,6 +21,7 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 
+import java.time.Duration;
 import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -39,6 +42,7 @@ class GateServiceTest {
     @Mock private VisitorService visitorService;
     @Mock private BlacklistService blacklistService;
     @Mock private WebSocketPushService webSocketPushService;
+    @Mock private RedisLock redisLock;
 
     private SysUser securityUser;
     private SysUser hostUser;
@@ -63,6 +67,8 @@ class GateServiceTest {
         SecurityContextHolder.getContext().setAuthentication(auth);
     }
 
+    // ── Checkin success ─────────────────────────────────────────────────
+
     @Test
     void testCheckin_Success() {
         GateCheckinRequest request = new GateCheckinRequest();
@@ -71,12 +77,15 @@ class GateServiceTest {
 
         PassCode passCode = PassCode.builder()
                 .id(1L).code("valid.code").appointmentId(1L)
-                .maxUses(2).usedCount(1).status(PassCodeStatusEnum.ACTIVE).build();
+                .maxUses(2).usedCount(0).status(PassCodeStatusEnum.ACTIVE).build();
 
-        when(passCodeService.verifyAndUse("valid.code", "ENTRY")).thenReturn(passCode);
+        when(passCodeService.verifyForScan("valid.code")).thenReturn(passCode);
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
         when(appointmentService.getById(1L)).thenReturn(testAppointment);
         when(visitorService.getById(10L)).thenReturn(testVisitor);
+        when(appointmentService.hasUndepartedAppointment(10L, 1L)).thenReturn(false);
         when(blacklistService.check(anyString(), any(), anyString())).thenReturn(null);
+        when(passCodeService.confirmUsage(1L)).thenReturn(passCode);
         when(sysUserMapper.findByUsername("security1")).thenReturn(securityUser);
         when(sysUserMapper.selectById(1L)).thenReturn(hostUser);
         when(accessLogMapper.insert(any())).thenReturn(1);
@@ -88,13 +97,66 @@ class GateServiceTest {
         assertEquals(AccessResultEnum.PASS, result.getResult());
         assertEquals("Main Gate", result.getGateLocation());
 
+        verify(passCodeService).confirmUsage(1L);
         verify(appointmentService).markCheckedIn(1L);
         verify(visitorService).incrementVisitCount(10L);
         verify(webSocketPushService).pushVisitorArrived("1", "Li Si", "APT001");
     }
 
+    // ── Checkin: duplicate scan (lock failed) ───────────────────────────
+
     @Test
-    void testCheckin_BlacklistedVisitor() {
+    void testCheckin_DuplicateScan() {
+        GateCheckinRequest request = new GateCheckinRequest();
+        request.setPassCode("valid.code");
+
+        PassCode passCode = PassCode.builder()
+                .id(1L).code("valid.code").appointmentId(1L).build();
+
+        when(passCodeService.verifyForScan("valid.code")).thenReturn(passCode);
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn(null);
+
+        BizException ex = assertThrows(BizException.class, () -> gateService.checkin(request));
+        assertEquals(ErrorCode.PASS_CODE_DUPLICATE_SCAN, ex.getErrorCode());
+
+        // Pass code should NOT have been consumed
+        verify(passCodeService, never()).confirmUsage(anyLong());
+    }
+
+    // ── Checkin: idempotent (already CHECKED_IN) ────────────────────────
+
+    @Test
+    void testCheckin_Idempotent_AlreadyCheckedIn() {
+        GateCheckinRequest request = new GateCheckinRequest();
+        request.setPassCode("valid.code");
+        request.setGateLocation("Main Gate");
+
+        testAppointment.setStatus(AppointmentStatusEnum.CHECKED_IN);
+
+        PassCode passCode = PassCode.builder()
+                .id(1L).code("valid.code").appointmentId(1L).build();
+
+        AccessLog existingLog = AccessLog.builder()
+                .id(100L).appointmentId(1L).action(AccessActionEnum.ENTRY)
+                .result(AccessResultEnum.PASS).gateLocation("Main Gate").build();
+
+        when(passCodeService.verifyForScan("valid.code")).thenReturn(passCode);
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
+        when(appointmentService.getById(1L)).thenReturn(testAppointment);
+        when(accessLogMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(existingLog);
+
+        AccessLog result = gateService.checkin(request);
+
+        assertEquals(100L, result.getId());
+        // Should NOT have consumed pass code or created new log
+        verify(passCodeService, never()).confirmUsage(anyLong());
+        verify(accessLogMapper, never()).insert(any());
+    }
+
+    // ── Checkin: blacklist interception (pass code NOT consumed) ─────────
+
+    @Test
+    void testCheckin_BlacklistedVisitor_PassCodeNotConsumed() {
         GateCheckinRequest request = new GateCheckinRequest();
         request.setPassCode("valid.code");
         request.setGateLocation("Main Gate");
@@ -105,18 +167,72 @@ class GateServiceTest {
         Blacklist blacklist = Blacklist.builder()
                 .id(1L).name("Li Si").reason("Previous incident").build();
 
-        when(passCodeService.verifyAndUse("valid.code", "ENTRY")).thenReturn(passCode);
+        when(passCodeService.verifyForScan("valid.code")).thenReturn(passCode);
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
         when(appointmentService.getById(1L)).thenReturn(testAppointment);
         when(visitorService.getById(10L)).thenReturn(testVisitor);
+        when(appointmentService.hasUndepartedAppointment(10L, 1L)).thenReturn(false);
         when(blacklistService.check(anyString(), any(), anyString())).thenReturn(blacklist);
         when(accessLogMapper.insert(any())).thenReturn(1);
 
         BizException ex = assertThrows(BizException.class, () -> gateService.checkin(request));
         assertEquals(ErrorCode.BLACKLIST_HIT, ex.getErrorCode());
 
-        verify(webSocketPushService).pushBlacklistAlert(eq("Li Si"), eq("Previous incident"), eq("Main Gate"));
+        // CRITICAL: pass code should NOT have been consumed
+        verify(passCodeService, never()).confirmUsage(anyLong());
+        // Anomaly record and denied log should be created
         verify(anomalyRecordMapper).insert(any());
+        verify(webSocketPushService).pushBlacklistAlert(eq("Li Si"), eq("Previous incident"), eq("Main Gate"));
     }
+
+    // ── Checkin: undeparted record blocks re-entry ──────────────────────
+
+    @Test
+    void testCheckin_UndepartedRecord_BlocksReentry() {
+        GateCheckinRequest request = new GateCheckinRequest();
+        request.setPassCode("valid.code");
+        request.setGateLocation("Main Gate");
+
+        PassCode passCode = PassCode.builder()
+                .id(1L).code("valid.code").appointmentId(1L).build();
+
+        when(passCodeService.verifyForScan("valid.code")).thenReturn(passCode);
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
+        when(appointmentService.getById(1L)).thenReturn(testAppointment);
+        when(visitorService.getById(10L)).thenReturn(testVisitor);
+        when(appointmentService.hasUndepartedAppointment(10L, 1L)).thenReturn(true);
+
+        BizException ex = assertThrows(BizException.class, () -> gateService.checkin(request));
+        assertEquals(ErrorCode.NO_REENTRY_WITHOUT_EXIT, ex.getErrorCode());
+
+        // Pass code should NOT have been consumed
+        verify(passCodeService, never()).confirmUsage(anyLong());
+        verify(appointmentService, never()).markCheckedIn(anyLong());
+    }
+
+    // ── Checkin: wrong appointment status ───────────────────────────────
+
+    @Test
+    void testCheckin_WrongAppointmentStatus() {
+        GateCheckinRequest request = new GateCheckinRequest();
+        request.setPassCode("valid.code");
+
+        testAppointment.setStatus(AppointmentStatusEnum.CANCELLED);
+
+        PassCode passCode = PassCode.builder()
+                .id(1L).code("valid.code").appointmentId(1L).build();
+
+        when(passCodeService.verifyForScan("valid.code")).thenReturn(passCode);
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
+        when(appointmentService.getById(1L)).thenReturn(testAppointment);
+
+        BizException ex = assertThrows(BizException.class, () -> gateService.checkin(request));
+        assertEquals(ErrorCode.APPOINTMENT_STATUS_INVALID, ex.getErrorCode());
+
+        verify(passCodeService, never()).confirmUsage(anyLong());
+    }
+
+    // ── Checkout success ────────────────────────────────────────────────
 
     @Test
     void testCheckout_Success() {
@@ -139,8 +255,31 @@ class GateServiceTest {
         verify(appointmentService).markCompleted(1L);
     }
 
+    // ── Checkout: idempotent ────────────────────────────────────────────
+
     @Test
-    void testCheckout_AlreadyDeparted() {
+    void testCheckout_Idempotent_AlreadyDeparted() {
+        testAppointment.setStatus(AppointmentStatusEnum.COMPLETED);
+
+        GateCheckoutRequest request = new GateCheckoutRequest();
+        request.setVisitorId(10L);
+        request.setAppointmentId(1L);
+
+        AccessLog existingLog = AccessLog.builder()
+                .id(200L).appointmentId(1L).action(AccessActionEnum.EXIT)
+                .result(AccessResultEnum.PASS).build();
+
+        when(appointmentService.getById(1L)).thenReturn(testAppointment);
+        when(accessLogMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(existingLog);
+
+        AccessLog result = gateService.checkout(request);
+
+        assertEquals(200L, result.getId());
+        verify(appointmentService, never()).markCompleted(anyLong());
+    }
+
+    @Test
+    void testCheckout_AlreadyDeparted_NoLog() {
         testAppointment.setStatus(AppointmentStatusEnum.COMPLETED);
 
         GateCheckoutRequest request = new GateCheckoutRequest();
@@ -148,6 +287,7 @@ class GateServiceTest {
         request.setAppointmentId(1L);
 
         when(appointmentService.getById(1L)).thenReturn(testAppointment);
+        when(accessLogMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(null);
 
         BizException ex = assertThrows(BizException.class, () -> gateService.checkout(request));
         assertEquals(ErrorCode.ALREADY_DEPARTED, ex.getErrorCode());
