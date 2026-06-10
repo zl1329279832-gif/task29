@@ -18,6 +18,8 @@ public class AnomalyRecord {
     private Long appointmentId;
     private AnomalyTypeEnum anomalyType;
     private String description;
+    private Long gateId;
+    private Long areaId;
     private Long securityId;
     private String handleResult;
     private AnomalyStatusEnum status;

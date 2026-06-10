@@ -21,6 +21,7 @@ public class PassCode {
     private LocalDateTime validFrom;
     private LocalDateTime validTo;
     private PassCodeStatusEnum status;
+    private String allowedAreas;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }

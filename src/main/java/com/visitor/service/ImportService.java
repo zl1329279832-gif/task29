@@ -39,6 +39,8 @@ public class ImportService {
     private final VisitorService visitorService;
     private final AppointmentService appointmentService;
     private final BlacklistService blacklistService;
+    private final AreaAuthorizationService areaAuthorizationService;
+    private final MeetingRoomService meetingRoomService;
     private final RedisLock redisLock;
     private final ObjectMapper objectMapper;
 
@@ -140,7 +142,8 @@ public class ImportService {
                     apptReq.setExpectedArrive(item.getExpectedArrive());
                     apptReq.setExpectedLeave(item.getExpectedLeave());
 
-                    createAppointmentForHost(request.getHostId(), apptReq, visitor);
+                    createAppointmentForHost(request.getHostId(), apptReq, visitor,
+                            request.getMeetingRoomId());
 
                     successCount++;
                 } catch (Exception e) {
@@ -202,8 +205,10 @@ public class ImportService {
 
     /**
      * Create appointment for a specific host (used in batch import).
+     * If meetingRoomId is provided, also creates area authorizations.
      */
-    private void createAppointmentForHost(Long hostId, AppointmentCreateRequest request, Visitor visitor) {
+    private void createAppointmentForHost(Long hostId, AppointmentCreateRequest request,
+                                           Visitor visitor, Long meetingRoomId) {
         SysUser host = sysUserMapper.selectById(hostId);
         if (host == null) {
             throw new IllegalArgumentException("Host not found");
@@ -220,9 +225,26 @@ public class ImportService {
                 .purpose(request.getPurpose())
                 .expectedArrive(request.getExpectedArrive())
                 .expectedLeave(request.getExpectedLeave())
+                .meetingRoomId(meetingRoomId)
                 .status(AppointmentStatusEnum.PENDING)
                 .build();
 
         appointmentMapper.insert(appointment);
+
+        // Auto-generate area authorizations based on meeting room
+        if (meetingRoomId != null) {
+            try {
+                LocalDateTime validFrom = request.getExpectedArrive();
+                LocalDateTime validTo = request.getExpectedLeave() != null
+                        ? request.getExpectedLeave()
+                        : request.getExpectedArrive().plusHours(8);
+                areaAuthorizationService.batchGrantForMeetingRoom(
+                        appointment.getId(), visitor.getId(), meetingRoomId,
+                        validFrom, validTo, hostId);
+            } catch (Exception e) {
+                log.warn("Failed to create area authorizations for appointment {}: {}",
+                        appointNo, e.getMessage());
+            }
+        }
     }
 }

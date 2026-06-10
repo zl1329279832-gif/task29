@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.visitor.model.dto.AnomalyReleaseRequest;
 import com.visitor.model.dto.GateCheckinRequest;
 import com.visitor.model.dto.GateCheckoutRequest;
+import com.visitor.model.dto.GateScanRequest;
 import com.visitor.model.entity.AccessLog;
 import com.visitor.model.vo.AccessLogVO;
 import com.visitor.model.vo.ApiResponse;
@@ -43,5 +44,10 @@ public class GateController {
     @PreAuthorize("hasRole('SECURITY') or hasRole('ADMIN')")
     public ApiResponse<AccessLog> anomalyRelease(@Valid @RequestBody AnomalyReleaseRequest request) {
         return ApiResponse.success(gateService.anomalyRelease(request));
+    }
+
+    @PostMapping("/pass-through")
+    public ApiResponse<AccessLog> passThrough(@Valid @RequestBody GateScanRequest request) {
+        return ApiResponse.success(gateService.passThroughGate(request));
     }
 }

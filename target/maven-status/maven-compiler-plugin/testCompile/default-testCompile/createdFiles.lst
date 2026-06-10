@@ -3,12 +3,17 @@ com\visitor\service\GateServiceTest.class
 com\visitor\service\CrossServiceScenarioTest$BlacklistInterception.class
 com\visitor\service\CrossServiceScenarioTest$PushConsistency.class
 com\visitor\service\PassCodeServiceTest.class
+com\visitor\service\MultiGateGateServiceTest.class
 com\visitor\service\WebSocketPushServiceTest.class
 com\visitor\util\QrCodeUtilTest.class
 com\visitor\service\CrossServiceScenarioTest.class
+com\visitor\service\ImportServiceExtTest.class
 com\visitor\service\ImportServiceTest.class
 com\visitor\service\AppointmentServiceTest.class
 com\visitor\service\CrossServiceScenarioTest$StateMachineGuards.class
+com\visitor\service\ScheduledTasksExtTest.class
+com\visitor\service\TrajectoryServiceTest.class
 com\visitor\service\ApprovalServiceTest.class
+com\visitor\service\AreaAuthorizationServiceTest.class
 com\visitor\task\ScheduledTasksTest.class
 com\visitor\service\BlacklistServiceTest.class

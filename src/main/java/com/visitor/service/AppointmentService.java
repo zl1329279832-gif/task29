@@ -8,6 +8,7 @@ import com.visitor.mapper.SysUserMapper;
 import com.visitor.model.dto.AppointmentCreateRequest;
 import com.visitor.model.dto.AppointmentRescheduleRequest;
 import com.visitor.model.entity.Appointment;
+import com.visitor.model.entity.PassCode;
 import com.visitor.model.entity.SysUser;
 import com.visitor.model.entity.Visitor;
 import com.visitor.model.enums.AppointmentStatusEnum;
@@ -37,6 +38,7 @@ public class AppointmentService {
     private final BlacklistService blacklistService;
     private final PassCodeService passCodeService;
     private final WebSocketPushService webSocketPushService;
+    private final AreaAuthorizationService areaAuthorizationService;
     private final RedisLock redisLock;
 
     private static final String APPOINTMENT_LOCK_PREFIX = "appointment:state:";
@@ -145,7 +147,31 @@ public class AppointmentService {
         appointment.setApprovedAt(LocalDateTime.now());
         appointmentMapper.updateById(appointment);
 
-        passCodeService.generateForAppointment(appointment);
+        PassCode passCode = passCodeService.generateForAppointment(appointment);
+
+        // If appointment has a meeting room, generate area authorizations and set allowedAreas
+        if (appointment.getMeetingRoomId() != null) {
+            try {
+                LocalDateTime validFrom = appointment.getExpectedArrive();
+                LocalDateTime validTo = appointment.getExpectedLeave() != null
+                        ? appointment.getExpectedLeave()
+                        : appointment.getExpectedArrive().plusHours(8);
+                areaAuthorizationService.batchGrantForMeetingRoom(
+                        appointment.getId(), appointment.getVisitorId(),
+                        appointment.getMeetingRoomId(),
+                        validFrom, validTo, approverId);
+                String allowedAreas = areaAuthorizationService.buildAllowedAreasString(appointment.getId());
+                if (allowedAreas != null) {
+                    passCode.setAllowedAreas(allowedAreas);
+                    passCodeService.getPassCodeById(passCode.getId()); // ensure exists
+                    // Update pass code with allowed areas via mapper
+                    passCode.setAllowedAreas(allowedAreas);
+                }
+            } catch (Exception e) {
+                log.warn("Failed to set area authorizations for appointment {}: {}",
+                        appointmentId, e.getMessage());
+            }
+        }
 
         SysUser host = sysUserMapper.selectById(appointment.getHostId());
         if (host != null) {

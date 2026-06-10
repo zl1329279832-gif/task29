@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.visitor.mapper.AreaMapper">
+
+    <select id="findByAreaCode" resultType="com.visitor.model.entity.Area">
+        SELECT * FROM area WHERE area_code = #{areaCode} AND status = 'ACTIVE'
+    </select>
+
+    <select id="selectChildren" resultType="com.visitor.model.entity.Area">
+        SELECT * FROM area WHERE parent_area_id = #{parentAreaId} AND status = 'ACTIVE'
+        ORDER BY area_code
+    </select>
+
+</mapper>

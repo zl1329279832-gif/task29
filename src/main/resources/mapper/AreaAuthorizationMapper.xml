@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.visitor.mapper.AreaAuthorizationMapper">
+
+    <select id="selectActiveAuth" resultType="com.visitor.model.entity.AreaAuthorization">
+        SELECT * FROM area_authorization
+        WHERE appointment_id = #{appointmentId}
+          AND area_id = #{areaId}
+          AND status = 'ACTIVE'
+          AND valid_from &lt;= NOW()
+          AND valid_to &gt;= NOW()
+        LIMIT 1
+    </select>
+
+    <select id="selectByAppointment" resultType="com.visitor.model.entity.AreaAuthorization">
+        SELECT * FROM area_authorization
+        WHERE appointment_id = #{appointmentId}
+        ORDER BY created_at
+    </select>
+
+    <update id="expireAuthorizations">
+        UPDATE area_authorization
+        SET status = 'EXPIRED', updated_at = NOW()
+        WHERE status = 'ACTIVE'
+          AND valid_to &lt; #{now}
+    </update>
+
+</mapper>

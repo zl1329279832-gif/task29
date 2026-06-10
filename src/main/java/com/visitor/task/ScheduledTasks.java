@@ -3,7 +3,9 @@ package com.visitor.task;
 import com.visitor.model.entity.Appointment;
 import com.visitor.model.entity.Visitor;
 import com.visitor.service.AppointmentService;
+import com.visitor.service.AreaAuthorizationService;
 import com.visitor.service.PassCodeService;
+import com.visitor.service.TrajectoryService;
 import com.visitor.service.VisitorService;
 import com.visitor.service.WebSocketPushService;
 import com.visitor.util.RedisLock;
@@ -25,10 +27,14 @@ public class ScheduledTasks {
     private final PassCodeService passCodeService;
     private final VisitorService visitorService;
     private final WebSocketPushService webSocketPushService;
+    private final TrajectoryService trajectoryService;
+    private final AreaAuthorizationService areaAuthorizationService;
     private final RedisLock redisLock;
 
     private static final String EXPIRE_LOCK_KEY = "scheduled:expireOverdueItems";
     private static final String UNDEPARTED_LOCK_KEY = "scheduled:detectUndepartedVisitors";
+    private static final String OVERTIME_AREA_LOCK_KEY = "scheduled:detectOvertimeAreaStay";
+    private static final String EXPIRE_AREA_AUTH_LOCK_KEY = "scheduled:expireAreaAuthorizations";
 
     /**
      * Every minute: expire overdue pending appointments and expired pass codes.
@@ -97,6 +103,52 @@ public class ScheduledTasks {
             log.error("Error in detectUndepartedVisitors task", e);
         } finally {
             redisLock.unlock(UNDEPARTED_LOCK_KEY, lockValue);
+        }
+    }
+
+    /**
+     * Every 3 minutes: detect visitors who have stayed in an area too long.
+     */
+    @Scheduled(fixedRate = 180000)
+    public void detectOvertimeAreaStay() {
+        String lockValue = redisLock.tryLock(OVERTIME_AREA_LOCK_KEY, Duration.ofSeconds(170));
+        if (lockValue == null) {
+            log.debug("Skipping detectOvertimeAreaStay: another instance is running");
+            return;
+        }
+
+        try {
+            int count = trajectoryService.detectOvertimeStay();
+            if (count > 0) {
+                log.info("Detected {} overtime area stays", count);
+            }
+        } catch (Exception e) {
+            log.error("Error in detectOvertimeAreaStay task", e);
+        } finally {
+            redisLock.unlock(OVERTIME_AREA_LOCK_KEY, lockValue);
+        }
+    }
+
+    /**
+     * Every minute: expire stale area authorizations.
+     */
+    @Scheduled(fixedRate = 60000)
+    public void expireAreaAuthorizations() {
+        String lockValue = redisLock.tryLock(EXPIRE_AREA_AUTH_LOCK_KEY, Duration.ofSeconds(55));
+        if (lockValue == null) {
+            log.debug("Skipping expireAreaAuthorizations: another instance is running");
+            return;
+        }
+
+        try {
+            int expired = areaAuthorizationService.expireAuthorizations();
+            if (expired > 0) {
+                log.info("Expired {} area authorizations", expired);
+            }
+        } catch (Exception e) {
+            log.error("Error in expireAreaAuthorizations task", e);
+        } finally {
+            redisLock.unlock(EXPIRE_AREA_AUTH_LOCK_KEY, lockValue);
         }
     }
 }

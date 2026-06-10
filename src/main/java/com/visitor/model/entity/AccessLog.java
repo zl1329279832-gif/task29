@@ -19,6 +19,8 @@ public class AccessLog {
     private Long appointmentId;
     private AccessActionEnum action;
     private String gateLocation;
+    private Long gateId;
+    private Long areaId;
     private AccessResultEnum result;
     private String denyReason;
     private Long operatorId;

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.visitor.mapper.GateMapper">
+
+    <select id="findByGateCode" resultType="com.visitor.model.entity.Gate">
+        SELECT * FROM gate WHERE gate_code = #{gateCode}
+    </select>
+
+    <select id="selectByAreaId" resultType="com.visitor.model.entity.Gate">
+        SELECT * FROM gate WHERE area_id = #{areaId} AND status = 'ACTIVE'
+        ORDER BY gate_code
+    </select>
+
+</mapper>

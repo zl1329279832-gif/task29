@@ -9,5 +9,6 @@ public class GateCheckoutRequest {
     private Long visitorId;
     @NotNull(message = "预约ID不能为空")
     private Long appointmentId;
+    private Long gateId;
     private String gateLocation;
 }

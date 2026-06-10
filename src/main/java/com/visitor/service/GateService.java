@@ -10,6 +10,7 @@ import com.visitor.mapper.SysUserMapper;
 import com.visitor.model.dto.AnomalyReleaseRequest;
 import com.visitor.model.dto.GateCheckinRequest;
 import com.visitor.model.dto.GateCheckoutRequest;
+import com.visitor.model.dto.GateScanRequest;
 import com.visitor.model.entity.*;
 import com.visitor.model.enums.*;
 import com.visitor.model.vo.AccessLogVO;
@@ -38,6 +39,10 @@ public class GateService {
     private final BlacklistService blacklistService;
     private final WebSocketPushService webSocketPushService;
     private final RedisLock redisLock;
+    private final GateManageService gateManageService;
+    private final AreaService areaService;
+    private final AreaAuthorizationService areaAuthorizationService;
+    private final TrajectoryService trajectoryService;
 
     private static final String GATE_CHECKIN_LOCK_PREFIX = "gate:checkin:";
 
@@ -46,16 +51,26 @@ public class GateService {
      *
      * Flow (all under distributed lock on appointmentId):
      *   1. Phase-1 pass code verify  (read-only, scan lock)
-     *   2. Appointment state check    (must be APPROVED)
-     *   3. Undeparted-record check    (visitor must not have an open CHECKED_IN)
-     *   4. Blacklist re-check         (before consuming the pass code)
-     *   5. Phase-2 pass code confirm  (commit usage count)
-     *   6. Mark CHECKED_IN + access log + WebSocket push
+     *   2. Resolve gate entity and area (if gateId provided)
+     *   3. Appointment state check    (must be APPROVED)
+     *   4. Undeparted-record check    (visitor must not have an open CHECKED_IN)
+     *   5. Blacklist re-check         (before consuming the pass code)
+     *   6. Area authorization check   (if gate has an area)
+     *   7. Phase-2 pass code confirm  (commit usage count)
+     *   8. Mark CHECKED_IN + access log + WebSocket push + trajectory
      */
     @Transactional
     public AccessLog checkin(GateCheckinRequest request) {
         // ── Phase 1: Read-only pass code validation ─────────────────────
         PassCode passCode = passCodeService.verifyForScan(request.getPassCode());
+
+        // ── Resolve gate and area ───────────────────────────────────────
+        Gate gate = null;
+        Area area = null;
+        if (request.getGateId() != null) {
+            gate = gateManageService.validateGateActive(request.getGateId());
+            area = areaService.getById(gate.getAreaId());
+        }
 
         // ── Acquire appointment-level lock ──────────────────────────────
         Long appointmentId = passCode.getAppointmentId();
@@ -88,7 +103,6 @@ public class GateService {
             }
 
             // ── 3. Undeparted-record check ──────────────────────────────
-            // Block re-entry if the visitor has another CHECKED_IN appointment (hasn't left yet)
             Visitor visitor = visitorService.getById(appointment.getVisitorId());
             if (hasUndepartedRecord(visitor.getId(), appointmentId)) {
                 throw new BizException(ErrorCode.NO_REENTRY_WITHOUT_EXIT,
@@ -98,14 +112,24 @@ public class GateService {
             // ── 4. Blacklist re-check at gate (BEFORE consuming pass code) ──
             Blacklist bl = blacklistService.check(visitor.getName(), visitor.getIdCard(), visitor.getPhone());
             if (bl != null) {
-                handleBlacklistDenial(passCode, visitor, appointment, bl, request.getGateLocation());
+                handleBlacklistDenial(passCode, visitor, appointment, bl,
+                        request.getGateLocation(), gate, area);
                 throw new BizException(ErrorCode.BLACKLIST_HIT, bl.getReason());
             }
 
-            // ── 5. Phase 2: Commit pass code usage ──────────────────────
+            // ── 5. Area authorization check (if gate has an area) ───────
+            if (area != null) {
+                if (!areaAuthorizationService.checkAuthorization(appointmentId, area.getId())) {
+                    handleAreaUnauthorized(passCode, visitor, appointment, gate, area);
+                    throw new BizException(ErrorCode.AREA_UNAUTHORIZED,
+                            "访客 " + visitor.getName() + " 未授权进入区域 " + area.getAreaName());
+                }
+            }
+
+            // ── 6. Phase 2: Commit pass code usage ──────────────────────
             passCodeService.confirmUsage(passCode.getId());
 
-            // ── 6. Mark checked in, create log, push notification ───────
+            // ── 7. Mark checked in, create log, push notification ───────
             appointmentService.markCheckedIn(appointmentId);
             visitorService.incrementVisitCount(visitor.getId());
 
@@ -118,10 +142,17 @@ public class GateService {
                     .appointmentId(appointmentId)
                     .action(AccessActionEnum.ENTRY)
                     .gateLocation(request.getGateLocation())
+                    .gateId(gate != null ? gate.getId() : null)
+                    .areaId(area != null ? area.getId() : null)
                     .result(AccessResultEnum.PASS)
                     .operatorId(operator != null ? operator.getId() : null)
                     .build();
             accessLogMapper.insert(accessLog);
+
+            // Record trajectory entry
+            if (gate != null && area != null) {
+                trajectoryService.recordEntry(visitor.getId(), appointmentId, gate.getId(), area.getId());
+            }
 
             // Push arrival notification to host
             SysUser host = sysUserMapper.selectById(appointment.getHostId());
@@ -130,7 +161,9 @@ public class GateService {
                         host.getId().toString(), visitor.getName(), appointment.getAppointNo());
             }
 
-            log.info("Visitor {} checked in for appointment {}", visitor.getName(), appointment.getAppointNo());
+            log.info("Visitor {} checked in for appointment {} at gate {}",
+                    visitor.getName(), appointment.getAppointNo(),
+                    gate != null ? gate.getGateName() : request.getGateLocation());
             return accessLog;
         } finally {
             redisLock.unlock(lockKey, lockValue);
@@ -146,6 +179,14 @@ public class GateService {
         Appointment appointment = appointmentService.getById(request.getAppointmentId());
         if (appointment == null) {
             throw new BizException(ErrorCode.APPOINTMENT_NOT_FOUND);
+        }
+
+        // Resolve gate and area
+        Gate gate = null;
+        Area area = null;
+        if (request.getGateId() != null) {
+            gate = gateManageService.getById(request.getGateId());
+            area = areaService.getById(gate.getAreaId());
         }
 
         // Idempotent: already completed
@@ -175,13 +216,81 @@ public class GateService {
                 .appointmentId(request.getAppointmentId())
                 .action(AccessActionEnum.EXIT)
                 .gateLocation(request.getGateLocation())
+                .gateId(gate != null ? gate.getId() : null)
+                .areaId(area != null ? area.getId() : null)
                 .result(AccessResultEnum.PASS)
                 .operatorId(operator != null ? operator.getId() : null)
                 .build();
         accessLogMapper.insert(accessLog);
 
+        // Record trajectory exit
+        if (gate != null && area != null) {
+            trajectoryService.recordExit(request.getVisitorId(), request.getAppointmentId(),
+                    gate.getId(), area.getId());
+        }
+
         log.info("Visitor {} checked out for appointment {}",
                 request.getVisitorId(), appointment.getAppointNo());
+        return accessLog;
+    }
+
+    /**
+     * Internal gate pass-through (not entry/exit, for internal area transitions).
+     * Does NOT consume pass code uses for internal gates.
+     * Checks area authorization and records trajectory.
+     */
+    @Transactional
+    public AccessLog passThroughGate(GateScanRequest request) {
+        // Verify pass code (read-only)
+        PassCode passCode = passCodeService.verifyForScan(request.getPassCode());
+
+        // Resolve gate and area
+        if (request.getGateId() == null) {
+            throw new BizException(ErrorCode.GATE_NOT_FOUND, "内部通行需要指定门岗");
+        }
+        Gate gate = gateManageService.validateGateActive(request.getGateId());
+        Area area = areaService.getById(gate.getAreaId());
+
+        Appointment appointment = appointmentService.getById(passCode.getAppointmentId());
+        if (appointment == null) {
+            throw new BizException(ErrorCode.APPOINTMENT_NOT_FOUND);
+        }
+        if (appointment.getStatus() != AppointmentStatusEnum.CHECKED_IN) {
+            throw new BizException(ErrorCode.APPOINTMENT_STATUS_INVALID,
+                    "访客尚未签到入园，不能通过内部门岗");
+        }
+
+        Visitor visitor = visitorService.getById(appointment.getVisitorId());
+
+        // Area authorization check
+        if (!areaAuthorizationService.checkAuthorization(appointment.getId(), area.getId())) {
+            handleAreaUnauthorized(passCode, visitor, appointment, gate, area);
+            throw new BizException(ErrorCode.AREA_UNAUTHORIZED,
+                    "访客 " + visitor.getName() + " 未授权进入区域 " + area.getAreaName());
+        }
+
+        String username = SecurityContextHolder.getContext().getAuthentication().getName();
+        SysUser operator = sysUserMapper.findByUsername(username);
+
+        AccessLog accessLog = AccessLog.builder()
+                .passCodeId(passCode.getId())
+                .visitorId(visitor.getId())
+                .appointmentId(appointment.getId())
+                .action(AccessActionEnum.ENTRY)
+                .gateLocation(request.getGateLocation())
+                .gateId(gate.getId())
+                .areaId(area.getId())
+                .result(AccessResultEnum.PASS)
+                .operatorId(operator != null ? operator.getId() : null)
+                .build();
+        accessLogMapper.insert(accessLog);
+
+        // Record trajectory
+        trajectoryService.recordPassThrough(visitor.getId(), appointment.getId(),
+                gate.getId(), area.getId());
+
+        log.info("Visitor {} passed through gate {} to area {}",
+                visitor.getName(), gate.getGateName(), area.getAreaName());
         return accessLog;
     }
 
@@ -237,10 +346,6 @@ public class GateService {
 
     // ── Private helpers ─────────────────────────────────────────────────
 
-    /**
-     * Check if the visitor has any CHECKED_IN appointment OTHER than the current one.
-     * If so, they haven't departed and re-entry is blocked.
-     */
     private boolean hasUndepartedRecord(Long visitorId, Long currentAppointmentId) {
         return appointmentService.hasUndepartedAppointment(visitorId, currentAppointmentId);
     }
@@ -250,12 +355,14 @@ public class GateService {
      */
     private void handleBlacklistDenial(PassCode passCode, Visitor visitor,
                                         Appointment appointment, Blacklist bl,
-                                        String gateLocation) {
+                                        String gateLocation, Gate gate, Area area) {
         createAnomaly(visitor.getId(), appointment.getId(),
                 AnomalyTypeEnum.BLACKLIST_ATTEMPT,
-                "Blacklisted visitor attempted entry: " + bl.getReason(), null);
+                "Blacklisted visitor attempted entry: " + bl.getReason(),
+                null, gate, area);
 
-        webSocketPushService.pushBlacklistAlert(visitor.getName(), bl.getReason(), gateLocation);
+        webSocketPushService.pushBlacklistAlert(visitor.getName(), bl.getReason(),
+                gate != null ? gate.getGateName() : gateLocation);
 
         AccessLog deniedLog = AccessLog.builder()
                 .passCodeId(passCode.getId())
@@ -263,6 +370,8 @@ public class GateService {
                 .appointmentId(appointment.getId())
                 .action(AccessActionEnum.ENTRY)
                 .gateLocation(gateLocation)
+                .gateId(gate != null ? gate.getId() : null)
+                .areaId(area != null ? area.getId() : null)
                 .result(AccessResultEnum.DENIED)
                 .denyReason("BLACKLISTED: " + bl.getReason())
                 .build();
@@ -272,14 +381,47 @@ public class GateService {
                 visitor.getName(), appointment.getAppointNo(), bl.getReason());
     }
 
+    /**
+     * Handle unauthorized area access: create anomaly, denied log, push alert.
+     */
+    private void handleAreaUnauthorized(PassCode passCode, Visitor visitor,
+                                         Appointment appointment, Gate gate, Area area) {
+        createAnomaly(visitor.getId(), appointment.getId(),
+                AnomalyTypeEnum.UNAUTHORIZED_AREA,
+                "访客 " + visitor.getName() + " 尝试进入未授权区域 " + area.getAreaName()
+                        + " (门岗: " + gate.getGateName() + ")",
+                null, gate, area);
+
+        webSocketPushService.pushAreaUnauthorized(
+                visitor.getName(), gate.getGateName(), area.getAreaName());
+
+        AccessLog deniedLog = AccessLog.builder()
+                .passCodeId(passCode.getId())
+                .visitorId(visitor.getId())
+                .appointmentId(appointment.getId())
+                .action(AccessActionEnum.ENTRY)
+                .gateLocation(gate.getGateName())
+                .gateId(gate.getId())
+                .areaId(area.getId())
+                .result(AccessResultEnum.DENIED)
+                .denyReason("UNAUTHORIZED_AREA: " + area.getAreaName())
+                .build();
+        accessLogMapper.insert(deniedLog);
+
+        log.warn("Area unauthorized: visitor={}, gate={}, area={}",
+                visitor.getName(), gate.getGateName(), area.getAreaName());
+    }
+
     private void createAnomaly(Long visitorId, Long appointmentId, AnomalyTypeEnum type,
-                                String description, Long securityId) {
+                                String description, Long securityId, Gate gate, Area area) {
         AnomalyRecord record = AnomalyRecord.builder()
                 .visitorId(visitorId)
                 .appointmentId(appointmentId)
                 .anomalyType(type)
                 .description(description)
                 .securityId(securityId)
+                .gateId(gate != null ? gate.getId() : null)
+                .areaId(area != null ? area.getId() : null)
                 .status(AnomalyStatusEnum.OPEN)
                 .build();
         anomalyRecordMapper.insert(record);

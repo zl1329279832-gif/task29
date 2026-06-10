@@ -9,6 +9,7 @@ import java.util.List;
 public class MeetingVisitorImportRequest {
     @NotNull(message = "接待人ID不能为空")
     private Long hostId;
+    private Long meetingRoomId;
     @NotEmpty(message = "访客列表不能为空")
     private List<MeetingVisitorImportItem> visitors;
 }

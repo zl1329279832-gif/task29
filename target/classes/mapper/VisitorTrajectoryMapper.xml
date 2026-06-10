@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.visitor.mapper.VisitorTrajectoryMapper">
+
+    <select id="selectTrajectory" resultType="com.visitor.model.vo.TrajectoryVO">
+        SELECT vt.id, vt.visitor_id, vt.appointment_id,
+               vt.gate_id, vt.area_id, vt.action, vt.recorded_at,
+               vt.stay_duration_minutes, vt.departure_status,
+               v.name AS visitor_name,
+               g.gate_name AS gate_name,
+               a.area_name AS area_name
+        FROM visitor_trajectory vt
+        LEFT JOIN visitor v ON vt.visitor_id = v.id
+        LEFT JOIN gate g ON vt.gate_id = g.id
+        LEFT JOIN area a ON vt.area_id = a.id
+        <where>
+            <if test="visitorId != null">AND vt.visitor_id = #{visitorId}</if>
+            <if test="appointmentId != null">AND vt.appointment_id = #{appointmentId}</if>
+        </where>
+        ORDER BY vt.recorded_at ASC
+    </select>
+
+    <select id="selectCurrentAreaVisitors" resultType="com.visitor.model.entity.VisitorTrajectory">
+        SELECT * FROM visitor_trajectory
+        WHERE area_id = #{areaId}
+          AND action = 'ENTER_AREA'
+          AND departure_status = 'IN_AREA'
+        ORDER BY recorded_at DESC
+    </select>
+
+    <select id="selectOvertimeVisitors" resultType="com.visitor.model.entity.VisitorTrajectory">
+        SELECT * FROM visitor_trajectory
+        WHERE action = 'ENTER_AREA'
+          AND departure_status = 'IN_AREA'
+          AND TIMESTAMPDIFF(MINUTE, recorded_at, #{now}) > #{thresholdMinutes}
+        ORDER BY recorded_at ASC
+    </select>
+
+</mapper>

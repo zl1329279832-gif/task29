@@ -7,5 +7,6 @@ import lombok.Data;
 public class GateCheckinRequest {
     @NotBlank(message = "通行码不能为空")
     private String passCode;
+    private Long gateId;
     private String gateLocation;
 }

@@ -125,6 +125,58 @@ public class WebSocketPushService {
         pushToUserWithRetry(targetUserId, message, "gateStatusChange");
     }
 
+    /**
+     * Push unauthorized area access alert to security.
+     */
+    public void pushAreaUnauthorized(String visitorName, String gateName, String areaName) {
+        Map<String, Object> message = buildMessage("AREA_UNAUTHORIZED",
+                "visitorName", visitorName,
+                "gateName", gateName,
+                "areaName", areaName,
+                "message", "访客 " + visitorName + " 尝试通过 " + gateName + " 进入未授权区域 " + areaName);
+
+        pushToRoleWithRetry(RoleEnum.SECURITY.name(), message, "areaUnauthorized");
+    }
+
+    /**
+     * Push overtime area stay alert to security.
+     */
+    public void pushOvertimeAreaStay(String visitorName, String areaName, long overtimeMinutes) {
+        Map<String, Object> message = buildMessage("AREA_OVERTIME_STAY",
+                "visitorName", visitorName,
+                "areaName", areaName,
+                "overtimeMinutes", overtimeMinutes,
+                "message", "访客 " + visitorName + " 在区域 " + areaName + " 已超时停留 " + overtimeMinutes + " 分钟");
+
+        pushToRoleWithRetry(RoleEnum.SECURITY.name(), message, "overtimeAreaStay");
+    }
+
+    /**
+     * Push companion anomaly alert to security.
+     */
+    public void pushCompanionAnomaly(String visitorName, String description) {
+        Map<String, Object> message = buildMessage("COMPANION_ANOMALY",
+                "visitorName", visitorName,
+                "description", description,
+                "message", "同行人异常：" + description);
+
+        pushToRoleWithRetry(RoleEnum.SECURITY.name(), message, "companionAnomaly");
+    }
+
+    /**
+     * Push trajectory alert to security.
+     */
+    public void pushTrajectoryAlert(String visitorName, String gateName, String areaName, String action) {
+        Map<String, Object> message = buildMessage("TRAJECTORY_ALERT",
+                "visitorName", visitorName,
+                "gateName", gateName,
+                "areaName", areaName,
+                "action", action,
+                "message", "轨迹告警：访客 " + visitorName + " " + action + " " + areaName);
+
+        pushToRoleWithRetry(RoleEnum.SECURITY.name(), message, "trajectoryAlert");
+    }
+
     // ── Internal retry helpers ──────────────────────────────────────────
 
     private void pushToUserWithRetry(String userId, Map<String, Object> message, String pushType) {

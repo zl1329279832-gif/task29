@@ -46,6 +46,7 @@ class CrossServiceScenarioTest {
     @Mock private BlacklistService blacklistService;
     @Mock private PassCodeService passCodeService;
     @Mock private WebSocketPushService webSocketPushService;
+    @Mock private AreaAuthorizationService areaAuthorizationService;
     @Mock private RedisLock redisLock;
 
     private AppointmentService appointmentService;
@@ -58,7 +59,8 @@ class CrossServiceScenarioTest {
     void setUp() {
         appointmentService = new AppointmentService(
                 appointmentMapper, sysUserMapper, visitorService,
-                blacklistService, passCodeService, webSocketPushService, redisLock);
+                blacklistService, passCodeService, webSocketPushService,
+                areaAuthorizationService, redisLock);
 
         hostUser = SysUser.builder()
                 .id(1L).username("employee1").realName("Zhang San")

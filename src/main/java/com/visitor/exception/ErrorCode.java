@@ -41,6 +41,13 @@ public enum ErrorCode {
     NO_REENTRY_WITHOUT_EXIT(400020, "访客尚未离场，不允许重复入场"),
     BATCH_DUPLICATE_VISITOR(400021, "批次内访客重复"),
     APPROVAL_ALREADY_PROCESSED(400022, "审批已处理，请勿重复操作"),
+    GATE_NOT_FOUND(400023, "门岗不存在"),
+    GATE_INACTIVE(400024, "门岗未启用"),
+    AREA_NOT_FOUND(400025, "区域不存在"),
+    AREA_UNAUTHORIZED(400026, "未授权进入该区域"),
+    MEETING_ROOM_NOT_FOUND(400027, "会议室不存在"),
+    COMPANION_ANOMALY(400028, "同行人异常"),
+    AREA_OVERTIME_STAY(400029, "区域超时停留"),
 
     // System errors 500xxx
     SYSTEM_ERROR(500001, "系统内部错误"),
