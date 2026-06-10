@@ -1,0 +1,12 @@
+com\visitor\integration\AppointmentFlowIntegrationTest.class
+com\visitor\service\BatchImportServiceTest.class
+com\visitor\integration\PassCodeFlowIntegrationTest.class
+com\visitor\controller\AppointmentControllerTest.class
+com\visitor\controller\PassCodeControllerTest.class
+com\visitor\service\CheckInServiceTest.class
+com\visitor\controller\CheckInControllerTest$MethodSecurityConfig.class
+com\visitor\service\PassCodeServiceTest.class
+com\visitor\controller\CheckInControllerTest.class
+com\visitor\service\AppointmentServiceTest.class
+com\visitor\service\BlacklistServiceTest.class
+com\visitor\VisitorManagementApplicationTests.class

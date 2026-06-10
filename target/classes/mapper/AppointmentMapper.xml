@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.visitor.mapper.AppointmentMapper">
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO appointment (appointment_no, visitor_id, host_user_id, visit_reason,
+            visit_start_time, visit_end_time, status, visitor_count, remark, batch_import_id, created_by)
+        VALUES (#{appointmentNo}, #{visitorId}, #{hostUserId}, #{visitReason},
+            #{visitStartTime}, #{visitEndTime}, #{status}, #{visitorCount}, #{remark}, #{batchImportId}, #{createdBy})
+    </insert>
+    <select id="findById" resultType="com.visitor.entity.Appointment">
+        SELECT * FROM appointment WHERE id = #{id}
+    </select>
+    <select id="findByAppointmentNo" resultType="com.visitor.entity.Appointment">
+        SELECT * FROM appointment WHERE appointment_no = #{appointmentNo}
+    </select>
+    <update id="updateStatus">
+        UPDATE appointment SET status = #{status} WHERE id = #{id}
+    </update>
+    <update id="update">
+        UPDATE appointment
+        <set>
+            <if test="visitReason != null">visit_reason = #{visitReason},</if>
+            <if test="visitStartTime != null">visit_start_time = #{visitStartTime},</if>
+            <if test="visitEndTime != null">visit_end_time = #{visitEndTime},</if>
+            <if test="visitorCount != null">visitor_count = #{visitorCount},</if>
+            <if test="remark != null">remark = #{remark},</if>
+            <if test="status != null">status = #{status},</if>
+        </set>
+        WHERE id = #{id}
+    </update>
+    <select id="findByCondition" resultType="com.visitor.entity.Appointment">
+        SELECT a.* FROM appointment a
+        <if test="department != null">
+            INNER JOIN sys_user u ON a.host_user_id = u.id
+        </if>
+        <where>
+            <if test="hostUserId != null">AND a.host_user_id = #{hostUserId}</if>
+            <if test="createdBy != null">AND a.created_by = #{createdBy}</if>
+            <if test="department != null">AND u.department = #{department}</if>
+            <if test="status != null">AND a.status = #{status}</if>
+        </where>
+        ORDER BY a.created_at DESC LIMIT #{limit} OFFSET #{offset}
+    </select>
+    <select id="countByCondition" resultType="long">
+        SELECT COUNT(*) FROM appointment a
+        <if test="department != null">
+            INNER JOIN sys_user u ON a.host_user_id = u.id
+        </if>
+        <where>
+            <if test="hostUserId != null">AND a.host_user_id = #{hostUserId}</if>
+            <if test="createdBy != null">AND a.created_by = #{createdBy}</if>
+            <if test="department != null">AND u.department = #{department}</if>
+            <if test="status != null">AND a.status = #{status}</if>
+        </where>
+    </select>
+    <select id="findDuplicate" resultType="com.visitor.entity.Appointment">
+        SELECT * FROM appointment
+        WHERE visitor_id = #{visitorId}
+          AND status IN ('PENDING_APPROVAL', 'APPROVED')
+          AND visit_start_time &lt; #{endTime}
+          AND visit_end_time &gt; #{startTime}
+          <if test="excludeId != null">AND id != #{excludeId}</if>
+    </select>
+    <select id="findPendingApproval" resultType="com.visitor.entity.Appointment">
+        SELECT a.* FROM appointment a
+        <if test="department != null">
+            INNER JOIN sys_user u ON a.host_user_id = u.id
+        </if>
+        WHERE a.status = 'PENDING_APPROVAL'
+        <if test="department != null">AND u.department = #{department}</if>
+        ORDER BY a.created_at ASC LIMIT #{limit} OFFSET #{offset}
+    </select>
+    <select id="countPendingApproval" resultType="long">
+        SELECT COUNT(*) FROM appointment a
+        <if test="department != null">
+            INNER JOIN sys_user u ON a.host_user_id = u.id
+        </if>
+        WHERE a.status = 'PENDING_APPROVAL'
+        <if test="department != null">AND u.department = #{department}</if>
+    </select>
+    <select id="findExpiredApproved" resultType="com.visitor.entity.Appointment">
+        SELECT * FROM appointment WHERE status = 'APPROVED' AND visit_end_time &lt; #{now}
+    </select>
+    <select id="findOvertimeCheckedIn" resultType="com.visitor.entity.Appointment">
+        SELECT * FROM appointment WHERE status = 'CHECKED_IN' AND visit_end_time &lt; #{deadline}
+    </select>
+    <select id="countTodayAppointments" resultType="long">
+        SELECT COUNT(*) FROM appointment WHERE created_at BETWEEN #{todayStart} AND #{todayEnd}
+    </select>
+    <select id="countPendingApprovals" resultType="long">
+        SELECT COUNT(*) FROM appointment WHERE status = 'PENDING_APPROVAL'
+    </select>
+</mapper>

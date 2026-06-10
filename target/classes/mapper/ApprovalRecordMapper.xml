@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.visitor.mapper.ApprovalRecordMapper">
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO approval_record (appointment_id, approver_id, action, comment)
+        VALUES (#{appointmentId}, #{approverId}, #{action}, #{comment})
+    </insert>
+    <select id="findByAppointmentId" resultType="com.visitor.entity.ApprovalRecord">
+        SELECT * FROM approval_record WHERE appointment_id = #{appointmentId} ORDER BY created_at DESC
+    </select>
+    <select id="findByApproverId" resultType="com.visitor.entity.ApprovalRecord">
+        SELECT * FROM approval_record WHERE approver_id = #{approverId} ORDER BY created_at DESC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+    <select id="countByApproverId" resultType="long">
+        SELECT COUNT(*) FROM approval_record WHERE approver_id = #{approverId}
+    </select>
+</mapper>

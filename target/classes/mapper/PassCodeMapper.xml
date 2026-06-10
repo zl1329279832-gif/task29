@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.visitor.mapper.PassCodeMapper">
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO pass_code (appointment_id, code, status, max_use_count, used_count, valid_from, valid_until)
+        VALUES (#{appointmentId}, #{code}, #{status}, #{maxUseCount}, #{usedCount}, #{validFrom}, #{validUntil})
+    </insert>
+    <select id="findById" resultType="com.visitor.entity.PassCode">
+        SELECT * FROM pass_code WHERE id = #{id}
+    </select>
+    <select id="findByCode" resultType="com.visitor.entity.PassCode">
+        SELECT * FROM pass_code WHERE code = #{code}
+    </select>
+    <select id="findActiveByAppointmentId" resultType="com.visitor.entity.PassCode">
+        SELECT * FROM pass_code WHERE appointment_id = #{appointmentId} AND status = 'ACTIVE' LIMIT 1
+    </select>
+    <update id="updateStatus">
+        UPDATE pass_code SET status = #{status} WHERE id = #{id}
+    </update>
+    <update id="incrementUsedCount">
+        UPDATE pass_code SET used_count = used_count + 1
+        WHERE id = #{id} AND used_count &lt; #{maxUseCount}
+    </update>
+    <update id="expireByAppointmentId">
+        UPDATE pass_code SET status = 'EXPIRED' WHERE appointment_id = #{appointmentId} AND status = 'ACTIVE'
+    </update>
+    <select id="findExpiredActive" resultType="com.visitor.entity.PassCode">
+        SELECT * FROM pass_code WHERE status = 'ACTIVE' AND valid_until &lt; #{now}
+    </select>
+</mapper>

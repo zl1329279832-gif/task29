@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.visitor.mapper.BlacklistMapper">
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO blacklist (visitor_id, name, id_card, phone, reason, status, created_by)
+        VALUES (#{visitorId}, #{name}, #{idCard}, #{phone}, #{reason}, #{status}, #{createdBy})
+    </insert>
+    <select id="findById" resultType="com.visitor.entity.Blacklist">
+        SELECT * FROM blacklist WHERE id = #{id}
+    </select>
+    <update id="updateStatus">
+        UPDATE blacklist SET status = #{status} WHERE id = #{id}
+    </update>
+    <select id="findActive" resultType="com.visitor.entity.Blacklist">
+        SELECT * FROM blacklist WHERE status = 1 ORDER BY created_at DESC LIMIT #{limit} OFFSET #{offset}
+    </select>
+    <select id="countActive" resultType="long">
+        SELECT COUNT(*) FROM blacklist WHERE status = 1
+    </select>
+    <select id="findByPhoneAndActive" resultType="com.visitor.entity.Blacklist">
+        SELECT * FROM blacklist WHERE phone = #{phone} AND status = 1 LIMIT 1
+    </select>
+    <select id="findByIdCardAndActive" resultType="com.visitor.entity.Blacklist">
+        SELECT * FROM blacklist WHERE id_card = #{idCard} AND status = 1 LIMIT 1
+    </select>
+    <select id="findAllActive" resultType="com.visitor.entity.Blacklist">
+        SELECT * FROM blacklist WHERE status = 1
+    </select>
+</mapper>

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.visitor.mapper.CheckInRecordMapper">
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO check_in_record (appointment_id, visitor_id, pass_code_id, check_in_time, gate_id, status)
+        VALUES (#{appointmentId}, #{visitorId}, #{passCodeId}, #{checkInTime}, #{gateId}, #{status})
+    </insert>
+    <select id="findById" resultType="com.visitor.entity.CheckInRecord">
+        SELECT * FROM check_in_record WHERE id = #{id}
+    </select>
+    <update id="updateCheckOut">
+        UPDATE check_in_record SET check_out_time = #{checkOutTime}, check_out_gate_id = #{checkOutGateId},
+            remark = #{remark}, status = 'CHECKED_OUT' WHERE id = #{id}
+    </update>
+    <update id="updateStatus">
+        UPDATE check_in_record SET status = #{status} WHERE id = #{id}
+    </update>
+    <select id="findCurrentVisitors" resultType="com.visitor.entity.CheckInRecord">
+        SELECT * FROM check_in_record WHERE status = 'CHECKED_IN' ORDER BY check_in_time DESC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+    <select id="countCurrentVisitors" resultType="long">
+        SELECT COUNT(*) FROM check_in_record WHERE status = 'CHECKED_IN'
+    </select>
+    <select id="findByCondition" resultType="com.visitor.entity.CheckInRecord">
+        SELECT * FROM check_in_record
+        <where>
+            <if test="visitorId != null">AND visitor_id = #{visitorId}</if>
+            <if test="appointmentId != null">AND appointment_id = #{appointmentId}</if>
+        </where>
+        ORDER BY created_at DESC LIMIT #{limit} OFFSET #{offset}
+    </select>
+    <select id="countByCondition" resultType="long">
+        SELECT COUNT(*) FROM check_in_record
+        <where>
+            <if test="visitorId != null">AND visitor_id = #{visitorId}</if>
+            <if test="appointmentId != null">AND appointment_id = #{appointmentId}</if>
+        </where>
+    </select>
+    <select id="findActiveByAppointmentId" resultType="com.visitor.entity.CheckInRecord">
+        SELECT * FROM check_in_record WHERE appointment_id = #{appointmentId} AND status = 'CHECKED_IN' LIMIT 1
+    </select>
+    <select id="countTodayCheckIns" resultType="long">
+        SELECT COUNT(*) FROM check_in_record WHERE check_in_time BETWEEN #{todayStart} AND #{todayEnd}
+    </select>
+</mapper>

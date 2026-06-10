@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.visitor.mapper.NotificationMapper">
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO notification (target_user_id, type, title, content, is_read, reference_id, reference_type)
+        VALUES (#{targetUserId}, #{type}, #{title}, #{content}, #{isRead}, #{referenceId}, #{referenceType})
+    </insert>
+    <select id="findByUserId" resultType="com.visitor.entity.Notification">
+        SELECT * FROM notification WHERE target_user_id = #{userId} ORDER BY created_at DESC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+    <select id="countUnreadByUserId" resultType="long">
+        SELECT COUNT(*) FROM notification WHERE target_user_id = #{userId} AND is_read = 0
+    </select>
+    <update id="markAsRead">
+        UPDATE notification SET is_read = 1 WHERE id = #{id}
+    </update>
+</mapper>

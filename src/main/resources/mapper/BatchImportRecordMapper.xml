@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.visitor.mapper.BatchImportRecordMapper">
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO batch_import_record (file_name, total_count, success_count, fail_count, status, created_by)
+        VALUES (#{fileName}, #{totalCount}, #{successCount}, #{failCount}, #{status}, #{createdBy})
+    </insert>
+    <select id="findById" resultType="com.visitor.entity.BatchImportRecord">
+        SELECT * FROM batch_import_record WHERE id = #{id}
+    </select>
+    <update id="updateResult">
+        UPDATE batch_import_record SET success_count = #{successCount}, fail_count = #{failCount},
+            status = #{status}, error_detail = #{errorDetail} WHERE id = #{id}
+    </update>
+</mapper>

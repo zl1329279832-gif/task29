@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.visitor.mapper.VisitorMapper">
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO visitor (name, phone, id_card, company, email, photo_url)
+        VALUES (#{name}, #{phone}, #{idCard}, #{company}, #{email}, #{photoUrl})
+    </insert>
+    <select id="findById" resultType="com.visitor.entity.Visitor">
+        SELECT * FROM visitor WHERE id = #{id}
+    </select>
+    <select id="findByPhone" resultType="com.visitor.entity.Visitor">
+        SELECT * FROM visitor WHERE phone = #{phone} LIMIT 1
+    </select>
+    <select id="findByIdCard" resultType="com.visitor.entity.Visitor">
+        SELECT * FROM visitor WHERE id_card = #{idCard} LIMIT 1
+    </select>
+    <update id="update">
+        UPDATE visitor
+        <set>
+            <if test="name != null">name = #{name},</if>
+            <if test="phone != null">phone = #{phone},</if>
+            <if test="idCard != null">id_card = #{idCard},</if>
+            <if test="company != null">company = #{company},</if>
+            <if test="email != null">email = #{email},</if>
+            <if test="photoUrl != null">photo_url = #{photoUrl},</if>
+        </set>
+        WHERE id = #{id}
+    </update>
+    <select id="findAll" resultType="com.visitor.entity.Visitor">
+        SELECT * FROM visitor ORDER BY created_at DESC LIMIT #{limit} OFFSET #{offset}
+    </select>
+    <select id="count" resultType="long">
+        SELECT COUNT(*) FROM visitor
+    </select>
+    <select id="search" resultType="com.visitor.entity.Visitor">
+        SELECT * FROM visitor
+        WHERE name LIKE CONCAT('%', #{keyword}, '%')
+           OR phone LIKE CONCAT('%', #{keyword}, '%')
+           OR id_card LIKE CONCAT('%', #{keyword}, '%')
+        ORDER BY created_at DESC LIMIT #{limit} OFFSET #{offset}
+    </select>
+    <select id="searchCount" resultType="long">
+        SELECT COUNT(*) FROM visitor
+        WHERE name LIKE CONCAT('%', #{keyword}, '%')
+           OR phone LIKE CONCAT('%', #{keyword}, '%')
+           OR id_card LIKE CONCAT('%', #{keyword}, '%')
+    </select>
+</mapper>
