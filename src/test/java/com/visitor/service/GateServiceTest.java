@@ -139,7 +139,7 @@ class GateServiceTest {
                 .id(1L).code("valid.code").appointmentId(1L).build();
 
         AccessLog existingLog = AccessLog.builder()
-                .id(100L).appointmentId(1L).action(AccessActionEnum.ENTRY)
+                .id(100L).passCodeId(1L).appointmentId(1L).action(AccessActionEnum.ENTRY)
                 .result(AccessResultEnum.PASS).gateLocation("Main Gate").build();
 
         when(passCodeService.verifyForScan("valid.code")).thenReturn(passCode);
@@ -246,6 +246,7 @@ class GateServiceTest {
         request.setGateLocation("Main Gate");
 
         when(appointmentService.getById(1L)).thenReturn(testAppointment);
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
         when(sysUserMapper.findByUsername("security1")).thenReturn(securityUser);
         when(visitorService.getById(10L)).thenReturn(testVisitor);
         when(accessLogMapper.insert(any())).thenReturn(1);
@@ -256,6 +257,7 @@ class GateServiceTest {
         assertEquals(AccessActionEnum.EXIT, result.getAction());
         assertEquals(AccessResultEnum.PASS, result.getResult());
         verify(appointmentService).markCompleted(1L);
+        verify(redisLock).unlock(anyString(), eq("lock-value"));
     }
 
     // ── Checkout: idempotent ────────────────────────────────────────────
@@ -463,6 +465,7 @@ class GateServiceTest {
         when(appointmentService.getById(1L)).thenReturn(testAppointment);
         when(areaService.getGateAndValidate(1L)).thenReturn(gate);
         when(areaService.isGateExitAllowed(gate)).thenReturn(true);
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
         when(sysUserMapper.findByUsername("security1")).thenReturn(securityUser);
         when(visitorService.getById(10L)).thenReturn(testVisitor);
         when(accessLogMapper.insert(any())).thenReturn(1);
@@ -474,6 +477,7 @@ class GateServiceTest {
         assertEquals(1L, result.getGateId());
         assertEquals(1L, result.getAreaId());
         verify(webSocketPushService).pushTrajectoryUpdate(eq("Li Si"), eq("A栋正门"), eq("A栋"), eq("EXIT"));
+        verify(redisLock).unlock(anyString(), eq("lock-value"));
     }
 
     @Test

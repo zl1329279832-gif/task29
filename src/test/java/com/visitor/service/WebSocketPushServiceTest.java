@@ -9,6 +9,8 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 
 import java.util.Map;
 
@@ -24,6 +26,9 @@ class WebSocketPushServiceTest {
 
     @Mock
     private VisitorWebSocketHandler webSocketHandler;
+
+    @Mock
+    private StringRedisTemplate stringRedisTemplate;
 
     // ── Push to user ────────────────────────────────────────────────────
 
@@ -239,5 +244,73 @@ class WebSocketPushServiceTest {
         assertEquals("TRAJECTORY_UPDATE", message.get("type"));
         assertEquals("Li Si", message.get("visitorName"));
         assertEquals("ENTRY", message.get("action"));
+    }
+
+    // ── Sequence number tests ────────────────────────────────────────────
+
+    @Test
+    @DisplayName("Push message contains sequence number from Redis")
+    void pushMessage_ContainsSequenceNumber() {
+        ValueOperations<String, String> valueOps = mock(ValueOperations.class);
+        when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+        when(valueOps.increment("ws:push:seq")).thenReturn(42L);
+
+        webSocketPushService.pushVisitorArrived("1", "Li Si", "APT001");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(webSocketHandler).pushToUser(eq("1"), captor.capture());
+
+        Map<String, Object> message = captor.getValue();
+        assertEquals(42L, message.get("seq"));
+    }
+
+    @Test
+    @DisplayName("Multiple pushes have monotonically increasing sequence numbers")
+    void multiplePushes_IncreasingSequence() {
+        ValueOperations<String, String> valueOps = mock(ValueOperations.class);
+        when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+        when(valueOps.increment("ws:push:seq"))
+                .thenReturn(1L)
+                .thenReturn(2L)
+                .thenReturn(3L);
+
+        webSocketPushService.pushVisitorArrived("1", "V1", "APT001");
+        webSocketPushService.pushBlacklistAlert("V2", "reason", "gate");
+        webSocketPushService.pushAnomalyAlert("TYPE", "V3", "desc");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> userCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(webSocketHandler).pushToUser(eq("1"), userCaptor.capture());
+        assertEquals(1L, userCaptor.getValue().get("seq"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> roleCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(webSocketHandler, times(2)).pushToRole(eq(RoleEnum.SECURITY.name()), roleCaptor.capture());
+
+        var messages = roleCaptor.getAllValues();
+        assertEquals(2L, messages.get(0).get("seq"));
+        assertEquals(3L, messages.get(1).get("seq"));
+    }
+
+    @Test
+    @DisplayName("Push still works when Redis sequence generation fails")
+    void pushWorks_WhenSeqGenerationFails() {
+        ValueOperations<String, String> valueOps = mock(ValueOperations.class);
+        when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+        when(valueOps.increment("ws:push:seq")).thenThrow(new RuntimeException("Redis down"));
+
+        // Should NOT throw — graceful degradation
+        assertDoesNotThrow(() ->
+                webSocketPushService.pushVisitorArrived("1", "Li Si", "APT001"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(webSocketHandler).pushToUser(eq("1"), captor.capture());
+
+        // Message sent without seq field
+        Map<String, Object> message = captor.getValue();
+        assertEquals("VISITOR_ARRIVED", message.get("type"));
+        assertNull(message.get("seq"));
     }
 }

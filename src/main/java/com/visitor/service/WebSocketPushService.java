@@ -4,6 +4,7 @@ import com.visitor.model.enums.RoleEnum;
 import com.visitor.websocket.VisitorWebSocketHandler;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -16,8 +17,10 @@ import java.util.Map;
 public class WebSocketPushService {
 
     private final VisitorWebSocketHandler webSocketHandler;
+    private final StringRedisTemplate stringRedisTemplate;
 
     private static final int MAX_PUSH_RETRIES = 2;
+    private static final String PUSH_SEQ_KEY = "ws:push:seq";
 
     // ── Push methods with retry ─────────────────────────────────────────
 
@@ -219,6 +222,15 @@ public class WebSocketPushService {
         message.put("timestamp", LocalDateTime.now().toString());
         for (int i = 0; i + 1 < kvPairs.length; i += 2) {
             message.put(String.valueOf(kvPairs[i]), kvPairs[i + 1]);
+        }
+        // Atomic sequence number for client-side ordering detection
+        try {
+            Long seq = stringRedisTemplate.opsForValue().increment(PUSH_SEQ_KEY);
+            if (seq != null) {
+                message.put("seq", seq);
+            }
+        } catch (Exception e) {
+            log.warn("Failed to generate push sequence number: {}", e.getMessage());
         }
         return message;
     }

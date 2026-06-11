@@ -126,11 +126,20 @@ public class ImportService {
                     visitorReq.setCompany(item.getCompany());
                     Visitor visitor = visitorService.registerOrFind(visitorReq);
 
-                    // Blacklist check — skip this visitor if blacklisted
-                    Blacklist bl = blacklistService.check(
+                    // Blacklist assertion — throws BizException (caught by per-row catch)
+                    blacklistService.assertNotBlacklisted(
                             visitor.getName(), visitor.getIdCard(), visitor.getPhone());
-                    if (bl != null) {
-                        throw new IllegalArgumentException("Blacklisted: " + bl.getReason());
+
+                    // Duplicate appointment check (mirrors AppointmentService.create() validation)
+                    LocalDateTime endTime = item.getExpectedLeave() != null
+                            ? item.getExpectedLeave()
+                            : item.getExpectedArrive().plusHours(8);
+                    int dupCount = appointmentMapper.countDuplicate(
+                            visitor.getId(), request.getHostId(),
+                            item.getExpectedArrive(), endTime, null);
+                    if (dupCount > 0) {
+                        throw new IllegalArgumentException(
+                                "Duplicate appointment: visitor already has appointment in this time window");
                     }
 
                     // Create appointment for the specified host

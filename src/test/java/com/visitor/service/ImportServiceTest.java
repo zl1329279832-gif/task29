@@ -83,7 +83,8 @@ class ImportServiceTest {
         when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
         when(sysUserMapper.selectById(1L)).thenReturn(operator);
         when(visitorService.registerOrFind(any())).thenReturn(visitor);
-        when(blacklistService.check(any(), any(), any())).thenReturn(null);
+        doNothing().when(blacklistService).assertNotBlacklisted(any(), any(), any());
+        when(appointmentMapper.countDuplicate(anyLong(), anyLong(), any(), any(), any())).thenReturn(0);
         when(appointmentMapper.insert(any())).thenReturn(1);
         when(importBatchMapper.insert(any())).thenReturn(1);
 
@@ -118,7 +119,8 @@ class ImportServiceTest {
         when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
         when(sysUserMapper.selectById(1L)).thenReturn(operator);
         when(visitorService.registerOrFind(any())).thenReturn(visitor);
-        when(blacklistService.check(any(), any(), any())).thenReturn(null);
+        doNothing().when(blacklistService).assertNotBlacklisted(any(), any(), any());
+        when(appointmentMapper.countDuplicate(anyLong(), anyLong(), any(), any(), any())).thenReturn(0);
         when(appointmentMapper.insert(any())).thenReturn(1);
         when(importBatchMapper.insert(any())).thenReturn(1);
 
@@ -172,7 +174,8 @@ class ImportServiceTest {
         when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
         when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
         when(visitorService.registerOrFind(any())).thenReturn(visitor);
-        when(blacklistService.check(anyString(), any(), anyString())).thenReturn(bl);
+        doThrow(new BizException(ErrorCode.BLACKLIST_HIT, "Security threat"))
+                .when(blacklistService).assertNotBlacklisted(any(), any(), any());
         when(importBatchMapper.insert(any())).thenReturn(1);
 
         ImportBatch result = importService.importMeetingVisitors(request);
@@ -221,7 +224,8 @@ class ImportServiceTest {
         when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
         when(sysUserMapper.selectById(1L)).thenReturn(operator);
         when(visitorService.registerOrFind(any())).thenReturn(visitorA);
-        when(blacklistService.check(any(), any(), any())).thenReturn(null);
+        doNothing().when(blacklistService).assertNotBlacklisted(any(), any(), any());
+        when(appointmentMapper.countDuplicate(anyLong(), anyLong(), any(), any(), any())).thenReturn(0);
         when(appointmentMapper.insert(any())).thenReturn(1);
         when(importBatchMapper.insert(any())).thenReturn(1);
 
@@ -274,7 +278,8 @@ class ImportServiceTest {
         when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
         when(sysUserMapper.selectById(1L)).thenReturn(operator);
         when(visitorService.registerOrFind(any())).thenReturn(visitor);
-        when(blacklistService.check(any(), any(), any())).thenReturn(null);
+        doNothing().when(blacklistService).assertNotBlacklisted(any(), any(), any());
+        when(appointmentMapper.countDuplicate(anyLong(), anyLong(), any(), any(), any())).thenReturn(0);
         when(appointmentMapper.insert(any())).thenAnswer(invocation -> {
             com.visitor.model.entity.Appointment appt = invocation.getArgument(0);
             appt.setId(100L);
@@ -309,7 +314,8 @@ class ImportServiceTest {
         when(sysUserMapper.findByUsername("employee1")).thenReturn(operator);
         when(sysUserMapper.selectById(1L)).thenReturn(operator);
         when(visitorService.registerOrFind(any())).thenReturn(visitor);
-        when(blacklistService.check(any(), any(), any())).thenReturn(null);
+        doNothing().when(blacklistService).assertNotBlacklisted(any(), any(), any());
+        when(appointmentMapper.countDuplicate(anyLong(), anyLong(), any(), any(), any())).thenReturn(0);
         when(appointmentMapper.insert(any())).thenReturn(1);
         when(importBatchMapper.insert(any())).thenReturn(1);
 
