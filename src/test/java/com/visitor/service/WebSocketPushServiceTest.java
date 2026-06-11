@@ -240,4 +240,46 @@ class WebSocketPushServiceTest {
         assertEquals("Li Si", message.get("visitorName"));
         assertEquals("ENTRY", message.get("action"));
     }
+
+    // ── Push sequence ordering ──────────────────────────────────────────
+
+    @Test
+    @DisplayName("Push messages have monotonically increasing sequence numbers")
+    void pushMessages_haveMonotonicallyIncreasingSequence() {
+        // Send multiple pushes in sequence
+        webSocketPushService.pushVisitorArrived("1", "Li Si", "APT001");
+        webSocketPushService.pushTrajectoryUpdate("Li Si", "A栋正门", "A栋办公区", "ENTRY");
+        webSocketPushService.pushUndepartedWarning("Li Si", "APT001", 60);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> userCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(webSocketHandler).pushToUser(eq("1"), userCaptor.capture());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> roleCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(webSocketHandler, times(2)).pushToRole(eq(RoleEnum.SECURITY.name()), roleCaptor.capture());
+
+        // Extract sequence numbers
+        long seq1 = ((Number) userCaptor.getValue().get("sequence")).longValue();
+        long seq2 = ((Number) roleCaptor.getAllValues().get(0).get("sequence")).longValue();
+        long seq3 = ((Number) roleCaptor.getAllValues().get(1).get("sequence")).longValue();
+
+        // Verify monotonic ordering
+        assertTrue(seq1 < seq2, "Sequence should be monotonically increasing: " + seq1 + " < " + seq2);
+        assertTrue(seq2 < seq3, "Sequence should be monotonically increasing: " + seq2 + " < " + seq3);
+    }
+
+    @Test
+    @DisplayName("All push messages contain sequence field")
+    void pushMessages_allContainSequence() {
+        webSocketPushService.pushAnomalyAlert("OVERSTAY", "Li Si", "Overstay detected");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(webSocketHandler).pushToRole(eq(RoleEnum.SECURITY.name()), captor.capture());
+
+        Map<String, Object> message = captor.getValue();
+        assertNotNull(message.get("sequence"), "Message should contain sequence number");
+        assertTrue(message.get("sequence") instanceof Long, "Sequence should be a Long");
+    }
 }

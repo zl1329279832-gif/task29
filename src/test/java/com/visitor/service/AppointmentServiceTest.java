@@ -141,12 +141,13 @@ class AppointmentServiceTest {
         when(appointmentMapper.selectById(1L)).thenReturn(appointment);
         when(visitorService.getById(10L)).thenReturn(testVisitor);
         when(sysUserMapper.selectById(1L)).thenReturn(hostUser);
+        when(areaAuthorizationService.countAuthorizedAreas(1L)).thenReturn(0);
 
         appointmentService.approve(1L, 100L, "Approved");
 
         assertEquals(AppointmentStatusEnum.APPROVED, appointment.getStatus());
         assertEquals(100L, appointment.getApprovedBy());
-        verify(passCodeService).generateForAppointment(appointment);
+        verify(passCodeService).generateForAppointment(appointment, 1);
         verify(webSocketPushService).pushApprovalResult(eq("1"), eq("APT20240101"), eq(true), eq("Approved"));
     }
 
@@ -197,7 +198,7 @@ class AppointmentServiceTest {
         assertEquals(ErrorCode.BLACKLIST_HIT, ex.getErrorCode());
         // Appointment should NOT have been approved
         assertEquals(AppointmentStatusEnum.PENDING, appointment.getStatus());
-        verify(passCodeService, never()).generateForAppointment(any());
+        verify(passCodeService, never()).generateForAppointment(any(), anyInt());
     }
 
     // ── Reject tests ────────────────────────────────────────────────────

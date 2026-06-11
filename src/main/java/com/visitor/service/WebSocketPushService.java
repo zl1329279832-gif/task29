@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Slf4j
 @Service
@@ -18,6 +19,13 @@ public class WebSocketPushService {
     private final VisitorWebSocketHandler webSocketHandler;
 
     private static final int MAX_PUSH_RETRIES = 2;
+
+    /**
+     * Global monotonic sequence counter for client-side push ordering.
+     * Clients should process messages in ascending sequence order to guarantee
+     * correct state transitions (e.g., VISITOR_ARRIVED before TRAJECTORY_UPDATE).
+     */
+    private final AtomicLong pushSequence = new AtomicLong(0);
 
     // ── Push methods with retry ─────────────────────────────────────────
 
@@ -217,6 +225,7 @@ public class WebSocketPushService {
         Map<String, Object> message = new HashMap<>();
         message.put("type", type);
         message.put("timestamp", LocalDateTime.now().toString());
+        message.put("sequence", pushSequence.incrementAndGet());
         for (int i = 0; i + 1 < kvPairs.length; i += 2) {
             message.put(String.valueOf(kvPairs[i]), kvPairs[i + 1]);
         }

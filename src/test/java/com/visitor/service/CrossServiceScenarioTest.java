@@ -141,7 +141,7 @@ class CrossServiceScenarioTest {
         }
 
         @Test
-        @DisplayName("After reschedule and re-approval, new code is generated")
+        @DisplayName("After reschedule and re-approval, new code is generated with area count")
         void afterRescheduleAndReapproval_newCodeIsGenerated() {
             // Given: New PENDING appointment after reschedule
             Appointment newAppointment = Appointment.builder()
@@ -154,13 +154,14 @@ class CrossServiceScenarioTest {
             when(appointmentMapper.selectById(2L)).thenReturn(newAppointment);
             when(visitorService.getById(10L)).thenReturn(testVisitor);
             when(sysUserMapper.selectById(1L)).thenReturn(hostUser);
+            when(areaAuthorizationService.countAuthorizedAreas(2L)).thenReturn(0);
 
             // When: Admin approves the new appointment
             appointmentService.approve(2L, 100L, "Re-approved after reschedule");
 
-            // Then: New pass code is generated for the new appointment
+            // Then: New pass code is generated with correct area count
             assertEquals(AppointmentStatusEnum.APPROVED, newAppointment.getStatus());
-            verify(passCodeService).generateForAppointment(newAppointment);
+            verify(passCodeService).generateForAppointment(newAppointment, 1);
             verify(webSocketPushService).pushApprovalResult(
                     eq("1"), eq("APT002"), eq(true), eq("Re-approved after reschedule"));
         }
@@ -263,6 +264,7 @@ class CrossServiceScenarioTest {
             when(appointmentMapper.selectById(1L)).thenReturn(appointment);
             when(visitorService.getById(10L)).thenReturn(testVisitor);
             when(sysUserMapper.selectById(1L)).thenReturn(hostUser);
+            when(areaAuthorizationService.countAuthorizedAreas(1L)).thenReturn(0);
 
             appointmentService.approve(1L, 100L, "OK");
 

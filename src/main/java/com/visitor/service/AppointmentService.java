@@ -40,6 +40,8 @@ public class AppointmentService {
     private final WebSocketPushService webSocketPushService;
     private final RedisLock redisLock;
 
+    private static final String APPROVE_LOCK_PREFIX = "appointment:approve:";
+
     private static final String APPOINTMENT_LOCK_PREFIX = "appointment:state:";
 
     @Transactional
@@ -147,7 +149,9 @@ public class AppointmentService {
         appointment.setApprovedAt(LocalDateTime.now());
         appointmentMapper.updateById(appointment);
 
-        passCodeService.generateForAppointment(appointment);
+        // Count pre-existing area authorizations (e.g. from batch import) for dynamic maxUses
+        int authorizedAreaCount = areaAuthorizationService.countAuthorizedAreas(appointmentId);
+        passCodeService.generateForAppointment(appointment, Math.max(1, authorizedAreaCount));
 
         SysUser host = sysUserMapper.selectById(appointment.getHostId());
         if (host != null) {

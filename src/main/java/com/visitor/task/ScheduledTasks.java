@@ -1,7 +1,11 @@
 package com.visitor.task;
 
+import com.visitor.mapper.AnomalyRecordMapper;
 import com.visitor.model.entity.Appointment;
+import com.visitor.model.entity.AnomalyRecord;
 import com.visitor.model.entity.Visitor;
+import com.visitor.model.enums.AnomalyStatusEnum;
+import com.visitor.model.enums.AnomalyTypeEnum;
 import com.visitor.service.AppointmentService;
 import com.visitor.service.PassCodeService;
 import com.visitor.service.VisitorService;
@@ -25,6 +29,7 @@ public class ScheduledTasks {
     private final PassCodeService passCodeService;
     private final VisitorService visitorService;
     private final WebSocketPushService webSocketPushService;
+    private final AnomalyRecordMapper anomalyRecordMapper;
     private final RedisLock redisLock;
 
     private static final String EXPIRE_LOCK_KEY = "scheduled:expireOverdueItems";
@@ -82,6 +87,25 @@ public class ScheduledTasks {
                     }
 
                     long overdueMinutes = Duration.between(appt.getExpectedLeave(), now).toMinutes();
+
+                    // Create anomaly record for overstay (dedup: skip if OPEN record already exists)
+                    long existingCount = anomalyRecordMapper.selectCount(
+                            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<AnomalyRecord>()
+                                    .eq(AnomalyRecord::getAppointmentId, appt.getId())
+                                    .eq(AnomalyRecord::getAnomalyType, AnomalyTypeEnum.OVERSTAY)
+                                    .eq(AnomalyRecord::getStatus, AnomalyStatusEnum.OPEN));
+                    if (existingCount == 0) {
+                        AnomalyRecord anomaly = AnomalyRecord.builder()
+                                .visitorId(visitor.getId())
+                                .appointmentId(appt.getId())
+                                .anomalyType(AnomalyTypeEnum.OVERSTAY)
+                                .description("访客 " + visitor.getName() + " 超时未离场，已超时 "
+                                        + overdueMinutes + " 分钟")
+                                .status(AnomalyStatusEnum.OPEN)
+                                .build();
+                        anomalyRecordMapper.insert(anomaly);
+                        log.info("Created OVERSTAY anomaly for appointment {}", appt.getAppointNo());
+                    }
 
                     log.warn("Undeparted visitor: {} (appointment {}), overdue {} minutes",
                             visitor.getName(), appt.getAppointNo(), overdueMinutes);

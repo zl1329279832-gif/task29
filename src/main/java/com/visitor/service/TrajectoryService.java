@@ -48,6 +48,9 @@ public class TrajectoryService {
         Long currentAreaId = null;
         String currentAreaName = null;
         List<TrajectoryPointVO> points = new ArrayList<>();
+        // Track the last PASS action to determine current state:
+        // last ENTRY → visitor is in that area; last EXIT → visitor has departed
+        AccessActionEnum lastPassAction = null;
 
         for (AccessLogVO logEntry : logs) {
             TrajectoryPointVO point = TrajectoryPointVO.builder()
@@ -62,19 +65,29 @@ public class TrajectoryService {
                     .build();
             points.add(point);
 
-            if (logEntry.getAction() == AccessActionEnum.ENTRY
-                    && logEntry.getResult() == AccessResultEnum.PASS) {
+            if (logEntry.getResult() != AccessResultEnum.PASS) {
+                continue;
+            }
+
+            if (logEntry.getAction() == AccessActionEnum.ENTRY) {
                 if (entryTime == null) {
                     entryTime = logEntry.getCreatedAt();
                 }
                 currentAreaId = logEntry.getAreaId();
                 currentAreaName = logEntry.getAreaName();
+                lastPassAction = AccessActionEnum.ENTRY;
             }
-            if (logEntry.getAction() == AccessActionEnum.EXIT
-                    && logEntry.getResult() == AccessResultEnum.PASS) {
+            if (logEntry.getAction() == AccessActionEnum.EXIT) {
                 exitTime = logEntry.getCreatedAt();
+                // Clear current area on exit — trajectory closure
+                currentAreaId = null;
+                currentAreaName = null;
+                lastPassAction = AccessActionEnum.EXIT;
             }
         }
+
+        // departed = true when the last successful action is EXIT
+        boolean departed = lastPassAction == AccessActionEnum.EXIT;
 
         return TrajectoryVO.builder()
                 .appointmentId(appointmentId)
@@ -83,7 +96,7 @@ public class TrajectoryService {
                 .visitorName(visitor.getName())
                 .entryTime(entryTime)
                 .exitTime(exitTime)
-                .departed(exitTime != null)
+                .departed(departed)
                 .currentAreaId(currentAreaId)
                 .currentAreaName(currentAreaName)
                 .points(points)

@@ -1,7 +1,11 @@
 package com.visitor.task;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.visitor.mapper.AnomalyRecordMapper;
+import com.visitor.model.entity.AnomalyRecord;
 import com.visitor.model.entity.Appointment;
 import com.visitor.model.entity.Visitor;
+import com.visitor.model.enums.AnomalyTypeEnum;
 import com.visitor.model.enums.AppointmentStatusEnum;
 import com.visitor.service.AppointmentService;
 import com.visitor.service.PassCodeService;
@@ -32,6 +36,7 @@ class ScheduledTasksTest {
     @Mock private PassCodeService passCodeService;
     @Mock private VisitorService visitorService;
     @Mock private WebSocketPushService webSocketPushService;
+    @Mock private AnomalyRecordMapper anomalyRecordMapper;
     @Mock private RedisLock redisLock;
 
     // ── Expire overdue items ────────────────────────────────────────────
@@ -88,11 +93,42 @@ class ScheduledTasksTest {
                 .thenReturn("lock-value");
         when(appointmentService.getCheckedInOverdue()).thenReturn(List.of(overdueAppt));
         when(visitorService.getById(10L)).thenReturn(visitor);
+        when(anomalyRecordMapper.selectCount(any(LambdaQueryWrapper.class))).thenReturn(0L);
+        when(anomalyRecordMapper.insert(any())).thenReturn(1);
 
         scheduledTasks.detectUndepartedVisitors();
 
         verify(webSocketPushService).pushUndepartedWarning(eq("Li Si"), eq("APT001"), anyLong());
+        // Anomaly record should be created for overstay
+        verify(anomalyRecordMapper).insert(argThat(record ->
+                record.getAnomalyType() == AnomalyTypeEnum.OVERSTAY
+                        && record.getVisitorId().equals(10L)
+                        && record.getAppointmentId().equals(1L)));
         verify(redisLock).unlock(eq("scheduled:detectUndepartedVisitors"), eq("lock-value"));
+    }
+
+    @Test
+    void testDetectUndepartedVisitors_DedupExistingAnomaly() {
+        Appointment overdueAppt = Appointment.builder()
+                .id(1L).appointNo("APT001").visitorId(10L)
+                .status(AppointmentStatusEnum.CHECKED_IN)
+                .expectedLeave(LocalDateTime.now().minusHours(1))
+                .build();
+        Visitor visitor = Visitor.builder().id(10L).name("Li Si").build();
+
+        when(redisLock.tryLock(eq("scheduled:detectUndepartedVisitors"), any(Duration.class)))
+                .thenReturn("lock-value");
+        when(appointmentService.getCheckedInOverdue()).thenReturn(List.of(overdueAppt));
+        when(visitorService.getById(10L)).thenReturn(visitor);
+        // Simulate existing OPEN anomaly record — dedup should skip insert
+        when(anomalyRecordMapper.selectCount(any(LambdaQueryWrapper.class))).thenReturn(1L);
+
+        scheduledTasks.detectUndepartedVisitors();
+
+        // Warning is still pushed (repeated reminders are OK)
+        verify(webSocketPushService).pushUndepartedWarning(eq("Li Si"), eq("APT001"), anyLong());
+        // But anomaly record should NOT be duplicated
+        verify(anomalyRecordMapper, never()).insert(any());
     }
 
     @Test
@@ -137,10 +173,14 @@ class ScheduledTasksTest {
         when(visitorService.getById(10L)).thenThrow(new RuntimeException("DB error"));
         // Second visitor lookup succeeds
         when(visitorService.getById(20L)).thenReturn(visitor2);
+        when(anomalyRecordMapper.selectCount(any(LambdaQueryWrapper.class))).thenReturn(0L);
+        when(anomalyRecordMapper.insert(any())).thenReturn(1);
 
         scheduledTasks.detectUndepartedVisitors();
 
-        // Second visitor should still get the warning
+        // Second visitor should still get the warning and anomaly record
         verify(webSocketPushService).pushUndepartedWarning(eq("Wang Wu"), eq("APT002"), anyLong());
+        verify(anomalyRecordMapper).insert(argThat(record ->
+                record.getVisitorId().equals(20L)));
     }
 }

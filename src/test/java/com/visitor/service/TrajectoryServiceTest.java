@@ -108,10 +108,98 @@ class TrajectoryServiceTest {
         assertEquals(3, result.getPoints().size());
         assertEquals(t1, result.getEntryTime());
         assertEquals(t3, result.getExitTime());
+        // Last action is EXIT → visitor has departed, currentArea is cleared
         assertTrue(result.getDeparted());
-        // Current area is the area of the last ENTRY (B栋)
+        assertNull(result.getCurrentAreaId());
+        assertNull(result.getCurrentAreaName());
+    }
+
+    @Test
+    void testGetTrajectory_MultiGate_NotDeparted() {
+        LocalDateTime t1 = LocalDateTime.now().minusHours(3);
+        LocalDateTime t2 = LocalDateTime.now().minusHours(2);
+
+        AccessLogVO log1 = AccessLogVO.builder()
+                .id(1L).action(AccessActionEnum.ENTRY).result(AccessResultEnum.PASS)
+                .gateId(1L).gateName("A栋正门").areaId(1L).areaName("A栋办公区")
+                .createdAt(t1).build();
+        AccessLogVO log2 = AccessLogVO.builder()
+                .id(2L).action(AccessActionEnum.ENTRY).result(AccessResultEnum.PASS)
+                .gateId(2L).gateName("B栋正门").areaId(2L).areaName("B栋会议区")
+                .createdAt(t2).build();
+
+        when(appointmentMapper.selectById(1L)).thenReturn(testAppointment);
+        when(visitorService.getById(10L)).thenReturn(testVisitor);
+        when(accessLogMapper.selectTrajectory(1L)).thenReturn(List.of(log1, log2));
+
+        TrajectoryVO result = trajectoryService.getTrajectory(1L);
+
+        assertEquals(2, result.getPoints().size());
+        assertFalse(result.getDeparted());
+        // Last action is ENTRY to B → currentArea is B
         assertEquals(2L, result.getCurrentAreaId());
         assertEquals("B栋会议区", result.getCurrentAreaName());
+    }
+
+    @Test
+    void testGetTrajectory_EntryExitReentry_NotDeparted() {
+        LocalDateTime t1 = LocalDateTime.now().minusHours(4);
+        LocalDateTime t2 = LocalDateTime.now().minusHours(3);
+        LocalDateTime t3 = LocalDateTime.now().minusHours(2);
+
+        AccessLogVO log1 = AccessLogVO.builder()
+                .id(1L).action(AccessActionEnum.ENTRY).result(AccessResultEnum.PASS)
+                .gateId(1L).gateName("A栋正门").areaId(1L).areaName("A栋办公区")
+                .createdAt(t1).build();
+        AccessLogVO log2 = AccessLogVO.builder()
+                .id(2L).action(AccessActionEnum.EXIT).result(AccessResultEnum.PASS)
+                .gateId(1L).gateName("A栋正门").areaId(1L).areaName("A栋办公区")
+                .createdAt(t2).build();
+        AccessLogVO log3 = AccessLogVO.builder()
+                .id(3L).action(AccessActionEnum.ENTRY).result(AccessResultEnum.PASS)
+                .gateId(2L).gateName("B栋正门").areaId(2L).areaName("B栋会议区")
+                .createdAt(t3).build();
+
+        when(appointmentMapper.selectById(1L)).thenReturn(testAppointment);
+        when(visitorService.getById(10L)).thenReturn(testVisitor);
+        when(accessLogMapper.selectTrajectory(1L)).thenReturn(List.of(log1, log2, log3));
+
+        TrajectoryVO result = trajectoryService.getTrajectory(1L);
+
+        // Last action is ENTRY → not departed, currently in area 2
+        assertFalse(result.getDeparted());
+        assertEquals(2L, result.getCurrentAreaId());
+        assertEquals("B栋会议区", result.getCurrentAreaName());
+        assertEquals(t1, result.getEntryTime());
+        assertEquals(t2, result.getExitTime());
+    }
+
+    @Test
+    void testGetTrajectory_DeniedLogsNotAffectState() {
+        LocalDateTime t1 = LocalDateTime.now().minusHours(2);
+        LocalDateTime t2 = LocalDateTime.now().minusHours(1);
+
+        AccessLogVO entryLog = AccessLogVO.builder()
+                .id(1L).action(AccessActionEnum.ENTRY).result(AccessResultEnum.PASS)
+                .gateId(1L).gateName("A栋正门").areaId(1L).areaName("A栋办公区")
+                .createdAt(t1).build();
+        // DENIED log should not affect trajectory state
+        AccessLogVO deniedLog = AccessLogVO.builder()
+                .id(2L).action(AccessActionEnum.ENTRY).result(AccessResultEnum.DENIED)
+                .gateId(2L).gateName("B栋正门").areaId(2L).areaName("B栋会议区")
+                .createdAt(t2).build();
+
+        when(appointmentMapper.selectById(1L)).thenReturn(testAppointment);
+        when(visitorService.getById(10L)).thenReturn(testVisitor);
+        when(accessLogMapper.selectTrajectory(1L)).thenReturn(List.of(entryLog, deniedLog));
+
+        TrajectoryVO result = trajectoryService.getTrajectory(1L);
+
+        // DENIED log doesn't change state — still in area 1, not departed
+        assertFalse(result.getDeparted());
+        assertEquals(1L, result.getCurrentAreaId());
+        assertEquals("A栋办公区", result.getCurrentAreaName());
+        assertEquals(2, result.getPoints().size());
     }
 
     @Test

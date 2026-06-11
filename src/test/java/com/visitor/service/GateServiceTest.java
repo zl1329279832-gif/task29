@@ -245,7 +245,12 @@ class GateServiceTest {
         request.setAppointmentId(1L);
         request.setGateLocation("Main Gate");
 
+        PassCode passCode = PassCode.builder()
+                .id(1L).code("valid.code").appointmentId(1L).build();
+
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
         when(appointmentService.getById(1L)).thenReturn(testAppointment);
+        when(passCodeService.getPassCodeByAppointmentId(1L)).thenReturn(passCode);
         when(sysUserMapper.findByUsername("security1")).thenReturn(securityUser);
         when(visitorService.getById(10L)).thenReturn(testVisitor);
         when(accessLogMapper.insert(any())).thenReturn(1);
@@ -255,7 +260,9 @@ class GateServiceTest {
         assertNotNull(result);
         assertEquals(AccessActionEnum.EXIT, result.getAction());
         assertEquals(AccessResultEnum.PASS, result.getResult());
+        assertEquals(1L, result.getPassCodeId());
         verify(appointmentService).markCompleted(1L);
+        verify(redisLock).unlock(anyString(), eq("lock-value"));
     }
 
     // ── Checkout: idempotent ────────────────────────────────────────────
@@ -272,6 +279,7 @@ class GateServiceTest {
                 .id(200L).appointmentId(1L).action(AccessActionEnum.EXIT)
                 .result(AccessResultEnum.PASS).build();
 
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
         when(appointmentService.getById(1L)).thenReturn(testAppointment);
         when(accessLogMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(existingLog);
 
@@ -289,6 +297,7 @@ class GateServiceTest {
         request.setVisitorId(10L);
         request.setAppointmentId(1L);
 
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
         when(appointmentService.getById(1L)).thenReturn(testAppointment);
         when(accessLogMapper.selectOne(any(LambdaQueryWrapper.class))).thenReturn(null);
 
@@ -304,10 +313,26 @@ class GateServiceTest {
         request.setVisitorId(10L);
         request.setAppointmentId(1L);
 
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
         when(appointmentService.getById(1L)).thenReturn(testAppointment);
 
         BizException ex = assertThrows(BizException.class, () -> gateService.checkout(request));
         assertEquals(ErrorCode.NOT_CHECKED_IN, ex.getErrorCode());
+    }
+
+    // ── Checkout: concurrent lock ──────────────────────────────────────
+
+    @Test
+    void testCheckout_ConcurrentLock_BlocksDuplicate() {
+        GateCheckoutRequest request = new GateCheckoutRequest();
+        request.setVisitorId(10L);
+        request.setAppointmentId(1L);
+
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn(null);
+
+        BizException ex = assertThrows(BizException.class, () -> gateService.checkout(request));
+        assertEquals(ErrorCode.PASS_CODE_DUPLICATE_SCAN, ex.getErrorCode());
+        verify(appointmentService, never()).markCompleted(anyLong());
     }
 
     // ── Multi-gate tests ──────────────────────────────────────────────
@@ -355,6 +380,7 @@ class GateServiceTest {
         GateCheckinRequest request = new GateCheckinRequest();
         request.setPassCode("valid.code");
         request.setGateId(1L);
+        request.setGateLocation("B栋正门");
 
         PassCode passCode = PassCode.builder()
                 .id(1L).code("valid.code").appointmentId(1L).build();
@@ -374,6 +400,7 @@ class GateServiceTest {
         doThrow(new BizException(ErrorCode.UNAUTHORIZED_AREA_ACCESS))
                 .when(areaAuthorizationService).validateGateAccess(eq(1L), eq(1L), any());
         when(anomalyRecordMapper.insert(any())).thenReturn(1);
+        when(accessLogMapper.insert(any())).thenReturn(1);
 
         BizException ex = assertThrows(BizException.class, () -> gateService.checkin(request));
         assertEquals(ErrorCode.UNAUTHORIZED_AREA_ACCESS, ex.getErrorCode());
@@ -384,6 +411,11 @@ class GateServiceTest {
         verify(anomalyRecordMapper).insert(argThat(record ->
                 record.getAnomalyType() == AnomalyTypeEnum.UNAUTHORIZED_AREA
                         && record.getGateId() != null));
+        // DENIED access log should be created for trajectory consistency
+        verify(accessLogMapper).insert(argThat(log ->
+                log.getResult() == AccessResultEnum.DENIED
+                        && log.getAction() == AccessActionEnum.ENTRY
+                        && "UNAUTHORIZED_AREA: B栋正门".equals(log.getDenyReason())));
         verify(webSocketPushService).pushAreaViolationAlert(anyString(), anyString(), anyString(), anyString());
     }
 
@@ -394,6 +426,7 @@ class GateServiceTest {
         GateCheckinRequest request = new GateCheckinRequest();
         request.setPassCode("valid.code");
         request.setGateId(1L);
+        request.setGateLocation("A栋正门");
         request.setCompanionCount(5);
 
         PassCode passCode = PassCode.builder()
@@ -413,6 +446,7 @@ class GateServiceTest {
         when(areaService.isGateEntryAllowed(gate)).thenReturn(true);
         doNothing().when(areaAuthorizationService).validateGateAccess(eq(1L), eq(1L), any());
         when(anomalyRecordMapper.insert(any())).thenReturn(1);
+        when(accessLogMapper.insert(any())).thenReturn(1);
 
         BizException ex = assertThrows(BizException.class, () -> gateService.checkin(request));
         assertEquals(ErrorCode.COMPANION_LIMIT_EXCEEDED, ex.getErrorCode());
@@ -420,6 +454,10 @@ class GateServiceTest {
         verify(passCodeService, never()).confirmUsage(anyLong());
         verify(anomalyRecordMapper).insert(argThat(record ->
                 record.getAnomalyType() == AnomalyTypeEnum.COMPANION_ANOMALY));
+        // DENIED access log should be created for trajectory consistency
+        verify(accessLogMapper).insert(argThat(log ->
+                log.getResult() == AccessResultEnum.DENIED
+                        && log.getDenyReason().contains("COMPANION_EXCEEDED")));
         verify(webSocketPushService).pushCompanionAnomalyAlert(eq("Li Si"), eq(5), eq(2), anyString());
     }
 
@@ -460,9 +498,14 @@ class GateServiceTest {
                 .id(1L).name("A栋正门").areaId(1L).locationDesc("A栋")
                 .gateType(GateTypeEnum.NORMAL).status(1).build();
 
+        PassCode passCode = PassCode.builder()
+                .id(1L).code("valid.code").appointmentId(1L).build();
+
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
         when(appointmentService.getById(1L)).thenReturn(testAppointment);
         when(areaService.getGateAndValidate(1L)).thenReturn(gate);
         when(areaService.isGateExitAllowed(gate)).thenReturn(true);
+        when(passCodeService.getPassCodeByAppointmentId(1L)).thenReturn(passCode);
         when(sysUserMapper.findByUsername("security1")).thenReturn(securityUser);
         when(visitorService.getById(10L)).thenReturn(testVisitor);
         when(accessLogMapper.insert(any())).thenReturn(1);
@@ -473,6 +516,7 @@ class GateServiceTest {
         assertEquals(AccessActionEnum.EXIT, result.getAction());
         assertEquals(1L, result.getGateId());
         assertEquals(1L, result.getAreaId());
+        assertEquals(1L, result.getPassCodeId());
         verify(webSocketPushService).pushTrajectoryUpdate(eq("Li Si"), eq("A栋正门"), eq("A栋"), eq("EXIT"));
     }
 
@@ -489,6 +533,7 @@ class GateServiceTest {
                 .id(1L).name("入口闸机").areaId(1L)
                 .gateType(GateTypeEnum.ENTRY_ONLY).status(1).build();
 
+        when(redisLock.tryLock(anyString(), any(Duration.class))).thenReturn("lock-value");
         when(appointmentService.getById(1L)).thenReturn(testAppointment);
         when(areaService.getGateAndValidate(1L)).thenReturn(gate);
         when(areaService.isGateExitAllowed(gate)).thenReturn(false);

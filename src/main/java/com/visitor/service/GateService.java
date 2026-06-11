@@ -42,6 +42,7 @@ public class GateService {
     private final RedisLock redisLock;
 
     private static final String GATE_CHECKIN_LOCK_PREFIX = "gate:checkin:";
+    private static final String GATE_CHECKOUT_LOCK_PREFIX = "gate:checkout:";
 
     /**
      * Visitor check-in by scanning QR pass code.
@@ -119,11 +120,26 @@ public class GateService {
                     areaAuthorizationService.validateGateAccess(
                             appointmentId, gate.getId(), LocalDateTime.now());
                 } catch (BizException e) {
-                    // Unauthorized area access — create anomaly and push alert
+                    // Unauthorized area access — create anomaly, DENIED access log, and push alert
                     createAnomalyWithGate(visitor.getId(), appointmentId,
                             AnomalyTypeEnum.UNAUTHORIZED_AREA,
                             "访客 " + visitor.getName() + " 尝试进入未授权区域: " + gate.getName(),
                             null, gate.getId(), gate.getAreaId());
+
+                    // Write DENIED access log for area violation (trajectory consistency)
+                    AccessLog deniedLog = AccessLog.builder()
+                            .passCodeId(passCode.getId())
+                            .visitorId(visitor.getId())
+                            .appointmentId(appointmentId)
+                            .action(AccessActionEnum.ENTRY)
+                            .gateLocation(request.getGateLocation())
+                            .result(AccessResultEnum.DENIED)
+                            .denyReason("UNAUTHORIZED_AREA: " + gate.getName())
+                            .gateId(gate.getId())
+                            .areaId(gate.getAreaId())
+                            .build();
+                    accessLogMapper.insert(deniedLog);
+
                     webSocketPushService.pushAreaViolationAlert(
                             visitor.getName(), gate.getLocationDesc(), gate.getName(),
                             "未授权进入区域");
@@ -141,6 +157,22 @@ public class GateService {
                             "随行人数超限: 实际 " + request.getCompanionCount()
                                     + " 人, 限制 " + appointment.getMaxCompanions() + " 人",
                             null, resolvedGateId, resolvedAreaId);
+
+                    // Write DENIED access log for companion anomaly (trajectory consistency)
+                    AccessLog deniedLog = AccessLog.builder()
+                            .passCodeId(passCode.getId())
+                            .visitorId(visitor.getId())
+                            .appointmentId(appointmentId)
+                            .action(AccessActionEnum.ENTRY)
+                            .gateLocation(request.getGateLocation())
+                            .result(AccessResultEnum.DENIED)
+                            .denyReason("COMPANION_EXCEEDED: actual=" + request.getCompanionCount()
+                                    + " max=" + appointment.getMaxCompanions())
+                            .gateId(resolvedGateId)
+                            .areaId(resolvedAreaId)
+                            .build();
+                    accessLogMapper.insert(deniedLog);
+
                     webSocketPushService.pushCompanionAnomalyAlert(
                             visitor.getName(), request.getCompanionCount(),
                             appointment.getMaxCompanions(),
@@ -200,74 +232,93 @@ public class GateService {
     /**
      * Visitor check-out (departure).
      * Idempotent: if already COMPLETED, returns existing exit log.
+     * Uses distributed lock to prevent concurrent duplicate exits.
      */
     @Transactional
     public AccessLog checkout(GateCheckoutRequest request) {
-        Appointment appointment = appointmentService.getById(request.getAppointmentId());
-        if (appointment == null) {
-            throw new BizException(ErrorCode.APPOINTMENT_NOT_FOUND);
+        Long appointmentId = request.getAppointmentId();
+
+        // ── Acquire appointment-level lock for checkout ────────────────
+        String lockKey = GATE_CHECKOUT_LOCK_PREFIX + appointmentId;
+        String lockValue = redisLock.tryLock(lockKey, Duration.ofSeconds(30));
+        if (lockValue == null) {
+            throw new BizException(ErrorCode.PASS_CODE_DUPLICATE_SCAN,
+                    "该预约正在处理离场，请勿重复操作");
         }
 
-        // Idempotent: already completed
-        if (appointment.getStatus() == AppointmentStatusEnum.COMPLETED) {
-            AccessLog existingLog = findLatestExitLog(request.getAppointmentId());
-            if (existingLog != null) {
-                log.info("Idempotent checkout: appointment {} already COMPLETED, returning existing log",
-                        request.getAppointmentId());
-                return existingLog;
+        try {
+            Appointment appointment = appointmentService.getById(appointmentId);
+            if (appointment == null) {
+                throw new BizException(ErrorCode.APPOINTMENT_NOT_FOUND);
             }
-            throw new BizException(ErrorCode.ALREADY_DEPARTED);
-        }
 
-        if (appointment.getStatus() != AppointmentStatusEnum.CHECKED_IN) {
-            throw new BizException(ErrorCode.NOT_CHECKED_IN);
-        }
-
-        // Gate validation for exit
-        Gate gate = null;
-        Long resolvedGateId = null;
-        Long resolvedAreaId = null;
-        if (request.getGateId() != null) {
-            gate = areaService.getGateAndValidate(request.getGateId());
-            if (!areaService.isGateExitAllowed(gate)) {
-                throw new BizException(ErrorCode.GATE_AREA_MISMATCH,
-                        "该门岗仅允许入场，不允许出场");
+            // Idempotent: already completed
+            if (appointment.getStatus() == AppointmentStatusEnum.COMPLETED) {
+                AccessLog existingLog = findLatestExitLog(appointmentId);
+                if (existingLog != null) {
+                    log.info("Idempotent checkout: appointment {} already COMPLETED, returning existing log",
+                            appointmentId);
+                    return existingLog;
+                }
+                throw new BizException(ErrorCode.ALREADY_DEPARTED);
             }
-            resolvedGateId = gate.getId();
-            resolvedAreaId = gate.getAreaId();
+
+            if (appointment.getStatus() != AppointmentStatusEnum.CHECKED_IN) {
+                throw new BizException(ErrorCode.NOT_CHECKED_IN);
+            }
+
+            // Gate validation for exit
+            Gate gate = null;
+            Long resolvedGateId = null;
+            Long resolvedAreaId = null;
+            if (request.getGateId() != null) {
+                gate = areaService.getGateAndValidate(request.getGateId());
+                if (!areaService.isGateExitAllowed(gate)) {
+                    throw new BizException(ErrorCode.GATE_AREA_MISMATCH,
+                            "该门岗仅允许入场，不允许出场");
+                }
+                resolvedGateId = gate.getId();
+                resolvedAreaId = gate.getAreaId();
+            }
+
+            // Resolve passCodeId for trajectory link consistency
+            PassCode passCode = passCodeService.getPassCodeByAppointmentId(appointmentId);
+
+            // Mark completed
+            appointmentService.markCompleted(appointmentId);
+
+            // Create access log with passCodeId for trajectory consistency
+            String username = SecurityContextHolder.getContext().getAuthentication().getName();
+            SysUser operator = sysUserMapper.findByUsername(username);
+
+            AccessLog accessLog = AccessLog.builder()
+                    .passCodeId(passCode != null ? passCode.getId() : null)
+                    .visitorId(request.getVisitorId())
+                    .appointmentId(appointmentId)
+                    .action(AccessActionEnum.EXIT)
+                    .gateLocation(request.getGateLocation())
+                    .result(AccessResultEnum.PASS)
+                    .operatorId(operator != null ? operator.getId() : null)
+                    .gateId(resolvedGateId)
+                    .areaId(resolvedAreaId)
+                    .build();
+            accessLogMapper.insert(accessLog);
+
+            // Push trajectory update AFTER DB write
+            Visitor visitor = visitorService.getById(request.getVisitorId());
+            webSocketPushService.pushTrajectoryUpdate(
+                    visitor.getName(),
+                    gate != null ? gate.getName() : request.getGateLocation(),
+                    gate != null ? gate.getLocationDesc() : null,
+                    "EXIT");
+
+            log.info("Visitor {} checked out for appointment {} at gate {}",
+                    request.getVisitorId(), appointment.getAppointNo(),
+                    gate != null ? gate.getName() : request.getGateLocation());
+            return accessLog;
+        } finally {
+            redisLock.unlock(lockKey, lockValue);
         }
-
-        // Mark completed
-        appointmentService.markCompleted(request.getAppointmentId());
-
-        // Create access log
-        String username = SecurityContextHolder.getContext().getAuthentication().getName();
-        SysUser operator = sysUserMapper.findByUsername(username);
-
-        AccessLog accessLog = AccessLog.builder()
-                .visitorId(request.getVisitorId())
-                .appointmentId(request.getAppointmentId())
-                .action(AccessActionEnum.EXIT)
-                .gateLocation(request.getGateLocation())
-                .result(AccessResultEnum.PASS)
-                .operatorId(operator != null ? operator.getId() : null)
-                .gateId(resolvedGateId)
-                .areaId(resolvedAreaId)
-                .build();
-        accessLogMapper.insert(accessLog);
-
-        // Push trajectory update
-        Visitor visitor = visitorService.getById(request.getVisitorId());
-        webSocketPushService.pushTrajectoryUpdate(
-                visitor.getName(),
-                gate != null ? gate.getName() : request.getGateLocation(),
-                gate != null ? gate.getLocationDesc() : null,
-                "EXIT");
-
-        log.info("Visitor {} checked out for appointment {} at gate {}",
-                request.getVisitorId(), appointment.getAppointNo(),
-                gate != null ? gate.getName() : request.getGateLocation());
-        return accessLog;
     }
 
     /**
